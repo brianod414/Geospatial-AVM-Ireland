@@ -1,0 +1,3226 @@
+---
+title: "sr_ireland"
+author: "Brian O'Donovan"
+date: "2024-06-17"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Set-Up Project
+
+```{r setup, include=FALSE}
+##-----------------------------------------------------------------------------
+## Loading Data & Packages 
+##-----------------------------------------------------------------------------
+
+# general libraries 
+library(MASS)
+library(here)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(readxl)
+library(tidyr)
+library(Amelia) # missmap() plots missing values
+library(tibble)
+library(lubridate) #for datetime
+library(cowplot)
+library(ggridges) # multi histogram
+library(kableExtra)
+library(sjmisc) # format numbers wiht big_mark()
+library(scales) # comma function
+
+# libraries  for mapping 
+library(sf)
+library(viridis)
+library(tidygeocoder)
+library(sp)
+library(raster)
+library(leaflet)
+library(geodist) # distance measure
+library(geosphere) # for distm()
+
+# libraries for modelling 
+library(mgcv) # GAM
+library(gratia) # plotting splines
+library(caret) # cross validation
+library(emmeans) # for contrast scalings 
+library(randomForest)
+library(ModelMetrics)
+library(MRFtools) # devtools::install_github("eric-pedersen/MRFtools")
+library(quantregForest)
+
+set.seed(41)
+
+here::i_am("./Code/sr_ireland.Rmd")
+
+# aesthetics 
+theme_set(theme_classic())
+
+# load house data 
+hd <- readr::read_csv(here("Data/ppr_matched_2022_n_2023.csv"))
+hd_original <- hd
+
+
+
+
+# running functions file 
+source(here('./Code/sr2_text_mining_fns.R'))
+source(here('./Code/sr6_eda_fns.R'))
+source(here("Palette_Functions_ggplot.R"))
+
+table(hd_all$SubArea)
+# Aesthetics
+subarea_map_colours_vec <-  c('Cities' = '#3c5488b2', 'Rural' = '#7e6148b2', 'Towns' = '#009999' )
+subarea_map_colours <- scale_color_manual(values = subarea_map_colours_vec)
+subarea_map_colours_fill <- scale_fill_manual(values = subarea_map_colours_vec)
+
+
+```
+
+# Initial Data Cleaning
+
+```{r data cleaning, include=FALSE}
+
+
+##-----------------------------------------------------------------------------
+# Dropping Columns 
+##-----------------------------------------------------------------------------
+
+
+# non-unique columns and all missing values 
+unique_val <- data.frame(count = sapply(hd, function(x) n_distinct(x)))
+unique_val <- rownames_to_column(unique_val, 'col')
+non_unique_col <- c(unique_val$col[unique_val$count==1])
+
+# remove the above columns (missing or non-unique)
+hd <- dplyr::select(hd, -non_unique_col)
+
+# identify columns not of interest 
+summary(hd)
+no_interest_col <- c("Agency", "Development", "HouseNoStreet", "Location", "Neighborhood",
+                   "NoVatPrice", "Street", "StreetNumber", "UnitNumber", "VATExclusive"
+                   , 'DateAdvertised', 'DaysToSell', 'AreaAvgSqmPriceSd', 'AreaStatisticsRadius', 
+                   'AreaAvgSqmPriceMin', 'AreaAvgSqmPriceMax','AreaAvgSqmPriceSample', 'AreaAvgSqmPrice')
+# remove these columns 
+hd <- dplyr::select(hd, -no_interest_col)
+
+
+
+##-----------------------------------------------------------------------------
+# Dropping Rows (Missing Values)
+##-----------------------------------------------------------------------------
+
+# missmap(hd)
+
+missing_val <- data.frame(count = colSums(is.na(hd)))
+missing_val <- rownames_to_column(missing_val, 'col')
+all_missing_col <- c(missing_val$col[missing_val$count==nrow(hd)])
+all_missing_col # no columns with all missing values since we removed non-unique 
+
+# mark incomplete data (no type, bed/bath, description)
+hd$incomplete_data <- F
+hd$incomplete_data[is.na(hd$PropertyType) & is.na(hd$Beds) & is.na(hd$Baths) & is.na(hd$Description)] <- T 
+table(hd$incomplete_data)
+
+# remove the incomplete data and then drop column
+hd <- hd[!hd$incomplete_data, ]
+hd <- dplyr::select(hd, -incomplete_data)
+
+# remove notfullmarketprice properties (unneccessary)
+hd <- hd[!hd$NotFullMarketPrice, ]
+hd <- dplyr::select(hd, -NotFullMarketPrice)
+
+
+##-----------------------------------------------------------------------------
+# Refine Columns 
+##-----------------------------------------------------------------------------
+
+# datetime object
+hd$SaleDate <- mdy_hms(hd$SaleDate)
+
+# PropertyDescription is New, Second, Teach. 
+# change teach to new or second hand 
+hd$PropertyDescription[hd$PropertyDescription=='Teach/Árasán Cónaithe Atháimhe'] <- 'Second-Hand Dwelling house /Apartment'
+
+# map values and change column name to condition 
+mapping_condition <- c('New Dwelling house /Apartment' = 'New', 'Second-Hand Dwelling house /Apartment' = 'Second Hand')
+hd$PropertyCondition <- mapping_condition[hd$PropertyDescription]
+hd <- dplyr::select(hd, -PropertyDescription) # drop property Description
+
+
+
+##-----------------------------------------------------------------------------
+## Duplicate Entries  
+##-----------------------------------------------------------------------------
+
+# Any duplicate Id?
+dim(hd[duplicated(hd$Id), ])[1] # no duplicate Id's
+
+# Any duplciate longitude and latitude, date, address and description?
+duplicated_rows <- hd[duplicated(hd$Longitude) & duplicated(hd$Latitude) & duplicated(hd$RawAddress) & duplicated(hd$SaleDate) & duplicated(hd$Description), ] 
+dim(duplicated_rows)
+
+dup_indices <- duplicated(hd$Longitude) & duplicated(hd$Latitude) & duplicated(hd$SaleDate) & duplicated(hd$Description) & duplicated(hd$RawAddress)
+# Remove these duplicates
+hd <- hd[!dup_indices, ]
+
+
+# duplicate date, location and address 
+dup_indices <- duplicated(hd$Longitude) & duplicated(hd$Latitude) & duplicated(hd$SaleDate) & duplicated(hd$RawAddress)
+table(dup_indices)
+
+# Remove these duplicates
+hd <- hd[!dup_indices, ]
+
+# duplicate longitude and latitude 
+dup_indices <- duplicated(hd$Longitude) & duplicated(hd$Latitude) 
+table(dup_indices)
+
+# rectify duplicate longitude and latitude coordinates 
+while (dim(duplicated_rows)[1] >0) {
+  # repeat this code until all unique 
+  hd$count <- ave(seq_along(hd$Latitude), hd$Longitude, FUN = seq_along)
+  table(hd$count)
+  hd$Longitude[hd$count !=1] <- hd$Longitude[hd$count !=1] + 0.0001
+  hd$Latitude[hd$count !=1] <- hd$Latitude[hd$count !=1] + 0.0001
+  
+  # Find duplicated rows based on longitude and latitude
+  duplicated_rows <- hd[duplicated(hd$Longitude) & duplicated(hd$Latitude), ]
+}
+
+# remove temp column
+hd <- dplyr::select(hd, -c("count"))
+
+
+##-----------------------------------------------------------------------------
+## Outliers, Missing Values   
+##-----------------------------------------------------------------------------
+
+
+# remove missing Size and Description  
+hd <- hd %>% filter(!(is.na(Description) & is.na(Size)))
+
+# remove missing BER and Description 
+hd <- hd %>% filter(!(is.na(Description) & is.na(Ber)))
+
+
+## Outliers in Price: Upper End 
+# remove all abve 9m (multiunits)
+hd <- hd[hd$Price < 9000000,]
+# multi peroperty <9m which is multiunits
+hd <- hd[hd$Id != 536283, ]
+# no information on these high/ low priced properties 
+hd <- hd[hd$Id != 616930, ]
+hd <- hd[hd$Id != 547080, ]
+hd <- hd[hd$Id != 593295, ]
+
+# corrections based on listing 
+hd$Price[hd$Id == 527653] <- 222500 
+hd$Price[hd$Id == 530210] <- 369655
+hd$Price[hd$Id == 616330] <- 470000
+hd$Price[hd$Id == 536673] <- 330000
+hd$Price[hd$Id == 561398] <- 450000
+hd$Price[hd$Id == 574647] <- 450000
+
+
+
+```
+
+```{r Text Mining, Shapefiles, Subareas, include=FALSE}
+
+### Run text mining 
+source(here("./Code/sr3_text_mining.R"))
+
+### Create all shapefiles 
+source(here("./Code/sr4_mapping.R"))
+
+### run code to create subareas 
+source('./Code/sr5_create_subareas.R')
+
+```
+
+
+# Model Covaraites and Dependent Variable
+
+```{r Model Covaraites and Dependent Variable, include=FALSE}
+
+
+### The dependent variable 
+# log of price/size
+hd$LogPrice <- log(hd$Price)
+hd$Pricem2 <- hd$Price/hd$Size
+hd$LogPricem2 <- log(hd$Pricem2)
+
+hist(hd$LogPricem2)
+
+### Time variable 
+hd$Month <- month(hd$SaleDate)
+
+```
+
+
+# Model Preperation
+
+```{r Model Preperation, include=FALSE}
+
+#### Set Up for Spatial Surface ####
+coords <- hd[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+#plot(coords.km)
+
+coords.all <- cbind.data.frame(hd$Latitude, hd$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_all <- cbind.data.frame(dplyr::select(hd, -c('Longitude', 'Latitude')), coords.all)
+
+
+#### ********* ********* ********* CHECKPOINT ********* ********* ********* ####
+
+# cleaned data, modelling ready 
+write.csv(hd_all, './Data/hd_pre_model.csv', row.names = F)  # save temp 
+hd_all <- readr::read_csv('./Data/hd_pre_model.csv')
+
+
+# GAM functions 
+source("./Code/sr7_gam_fns.R")
+
+
+### Apply sum to zero constraints to factors 
+# create factor variable 
+hd_all$PropertyType.f <- as.factor(hd_all$PropertyType)
+contrasts(hd_all$PropertyType.f) <- contr.sum(length(unique(hd_all$PropertyType.f)), contrasts=TRUE)
+
+# factor variable for sub areas 
+hd_all$SubArea.f <- as.factor(hd_all$SubArea)
+contrasts(hd_all$SubArea.f) <- contr.sum(length(unique(hd_all$SubArea.f)), contrasts=TRUE)
+
+# Eircode as a factor 
+hd_all$Eircode.f <- as.factor(hd_all$Eircode)
+contrasts(hd_all$Eircode.f) <- contr.sum(length(unique(hd_all$Eircode.f)), contrasts=TRUE)
+
+# Ber as factor 
+hd_all$Ber.f <- as.factor(hd_all$Ber)
+contrasts(hd_all$Ber.f) <- contr.sum(length(unique(hd_all$Ber.f)), contrasts=TRUE)
+
+# Month as factor 
+hd_all$Month.f <- as.factor(hd_all$Month)
+contrasts(hd_all$Month.f) <- contr.sum(length(unique(hd_all$Month.f)), contrasts=TRUE)
+
+
+### Create Price Strata for Model Summary 
+hd_all$PriceStrata <- NA
+hd_all$PriceStrata[hd_all$Price < 100000] <- '0-100'
+hd_all$PriceStrata[hd_all$Price < 200000 & hd_all$Price >= 100000] <- '100-200'
+hd_all$PriceStrata[hd_all$Price < 300000 & hd_all$Price >= 200000] <- '200-300'
+hd_all$PriceStrata[hd_all$Price < 400000 & hd_all$Price >= 300000] <- '300-400'
+hd_all$PriceStrata[hd_all$Price < 500000 & hd_all$Price >= 400000] <- '400-500'
+hd_all$PriceStrata[hd_all$Price < 600000 & hd_all$Price >= 500000] <- '500-600'
+hd_all$PriceStrata[hd_all$Price < 700000 & hd_all$Price >= 600000] <- '600-700'
+hd_all$PriceStrata[hd_all$Price < 800000 & hd_all$Price >= 700000] <- '700-800'
+hd_all$PriceStrata[hd_all$Price < 900000 & hd_all$Price >= 800000] <- '800-900'
+hd_all$PriceStrata[hd_all$Price < 1000000 & hd_all$Price >= 900000] <- '900-1000'
+hd_all$PriceStrata[hd_all$Price < 1500000 & hd_all$Price >= 1000000] <- '1000-1500'
+hd_all$PriceStrata[hd_all$Price < 2000000 & hd_all$Price >= 1500000] <- '1500-2000'
+hd_all$PriceStrata[hd_all$Price < 3000000 & hd_all$Price >= 2000000] <- '2000-3000'
+hd_all$PriceStrata[hd_all$Price >= 3000000] <- '3000+'
+
+hd_all$PriceStrata <- factor(hd_all$PriceStrata, ordered = T, levels = 
+                               c('0-100','100-200','200-300','300-400','400-500',
+                                 '500-600','600-700','700-800','800-900','900-1000',
+                                 '1000-1500','1500-2000','2000-3000', '3000+'))
+unique_strata <- unique(hd_all$PriceStrata)
+
+
+## Morans I preparation 
+# Using distance matrix approach 
+# creating distance matrix 
+longlat_hd <- cbind(long = hd_all$Longitude, lat = hd_all$Latitude) %>% as.data.frame()
+dist_matrix <- as.matrix(dist(longlat_hd))
+
+#dist_matrix <- (as.matrix(distm(longlat_hd, fun = distHaversine))/1000)
+inv_dist_matrix <- 1/dist_matrix
+diag(inv_dist_matrix) <- 0
+
+max(inv_dist_matrix)
+sum(is.infinite(inv_dist_matrix)) # no duplicate points. 
+
+# standardise the rows and columns. 
+row_sum <- rowSums(inv_dist_matrix)
+rnormalised <- t(t(inv_dist_matrix) / row_sum)
+
+# final inverse dist matrix 
+inv_dist_matrix <- prop.table(rnormalised, margin = 1)
+
+# Morans I for distance. and price 
+library(ape)
+price_morans <- Moran.I(hd_all$Price, inv_dist_matrix)
+
+
+
+```
+
+# Exploratory Data Analysis
+
+```{r Exploratory Data Analysis, include=FALSE}
+
+##-----------------------------------------------------------------------------
+# Tables for Descriptions EDA  
+##-----------------------------------------------------------------------------
+
+# Table of variable description 
+variables_table <- data.frame(
+  Variable = c('Price','Month','Area', 'Longitude', 'Latitude', 'Eircode',
+               'Baths', 'Beds', 'Size', 'Property Type','BER', 'Description'), 
+  Description = c('Property sale price (\\euro)', 
+                  'Month of property sale', 
+                 'Area of the property from Dublin, Cork, Galway, Limerick, Towns or Rural',
+                 'Longitude co-ordinate of observation (World Geodetic System WGS84)',
+                 'Latitude co-ordinate of observation (World Geodetic System WGS84)', 
+                 'Eircode routing key of property', 
+                 'The number of bathrooms in the property', 
+                 'The number of bedrooms in the property', 
+                 'Internal area of the property in square metres (\\unit{\\metre\\squared})',
+                 'Property type categories from detached, semi-detached, townhouse, terraced, end-of-terrace, apartment, duplex',
+                 'Building energy rating of the property on a scale from A to G',
+                 'Property description from the listing website'))
+kbl(variables_table, booktabs = T, format = 'latex', caption = 'Variable names and descriptions',
+    linesep = "\\addlinespace", escape = F, label = 'variables') %>% 
+  kable_styling(full_width = T, latex_options = c('scale_down', font_size = 12)) %>% 
+  column_spec(1, width = "4cm") %>% 
+  column_spec(2, width = "12cm")
+
+
+# Table of sub area descriptions 
+subarea_table <- hd_all %>% group_by('Area' = SubArea) %>%   
+  summarise('Properties' = n(), 
+            'Eircode Regions' = length(unique(Eircode))) %>% 
+    mutate('Description' = c('Cork City', 'Dublin City', 'Galway City', 'Limerick City', 
+                         'Areas not in towns or cities',
+                         'Towns with over 20,000 inhabitants')) %>% 
+  as.data.frame()
+
+  total_vals <- hd_all %>% summarise('Properties' = n(), 'Eircode Regions' = length(unique(Eircode))) 
+
+  subarea_table <- subarea_table[, c(1, 4, 2, 3)]
+  subarea_table <- rbind(subarea_table, c('Area' = 'Total', 'Description' = '', total_vals))
+  
+kbl(subarea_table, booktabs = T, format = 'latex', caption = 'Area descriptions with the number of properties and Eircode regions',
+    linesep = "\\addlinespace", escape = F, label = 'area_desc') %>% 
+  kable_styling(full_width = T, latex_options = c('scale_down', font_size = 12)) %>% 
+  column_spec(1, width = c("2cm")) %>%
+  column_spec(2, width = c("10cm")) %>%
+  column_spec(3, width = c("2cm")) %>%
+  column_spec(4, width = c("2cm")) %>% 
+  row_spec(7,bold=T,hline_after = F)
+
+
+
+# Table of Dummy Variables 
+dummy_var_table <- dplyr::select(hd_all, c('HasAttic', 'HasGarden', 'HasCulDeSac', 
+                                           'HasGarage', 'IsRenovated', 'IsPeriod', 
+                                           'IsSouthFacing', 'IsGroundFlrApt', 
+                                           'IsSecondFlrApt', 'IsPenthouseApt', 'IsNew')) %>% 
+  colSums() %>% as.data.frame() %>% 
+  mutate('Description' = c('Attic Conversion', 'Garden', 'Cul-de-sac', 'Garage', 
+                           'Renovated Property', 'Period Property', 'South Facing Property', 
+                           'Ground Floor Apartment', 'Second Floor Apartment', 
+                           'Penthouse Apartment', 'New Property'))
+colnames(dummy_var_table) <- c('Count', 'Description'); rownames(dummy_var_table) <- NULL
+dummy_var_table <- dummy_var_table[,c(2, 1)]
+
+kbl(dummy_var_table, booktabs = T, format = 'latex', caption = 'Dummy variables and descriptions',
+    linesep = "\\addlinespace", escape = F, label = 'dummy_variables') %>% 
+  kable_styling(full_width = T, latex_options = c('scale_down', font_size = 12)) %>% 
+  column_spec(1, width = "7cm") %>% 
+  column_spec(2, width = "8cm")
+
+
+
+##-----------------------------------------------------------------------------
+# Summary Statistics: Overall Data 
+##-----------------------------------------------------------------------------
+
+hd %>%
+dplyr::select(Price, Pricem2, Size) %>%
+summarise(across(where(is.numeric), .fns = 
+                   list(min = min,
+                        median = median,
+                        mean = mean,
+                        stdev = sd,
+                        q25 = ~quantile(., 0.25),
+                        q75 = ~quantile(., 0.75),
+                        max = max))) %>%
+pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+
+
+#### The dependent variable
+pre_log_hist <- ggplot(hd, aes(x = Price))  + geom_histogram(color = 'darkgrey', fill = '#1aa7ec', bins = 30) +
+ggtitle("Histogram of Price") +
+labs(x = "Price (thousands €)", y = "Count") +
+theme_cowplot(font_size = 12)+theme(plot.title = element_text(hjust = 0.5)) 
+
+after_log_size_hist <- ggplot(hd, aes(x = LogPricem2)) + geom_histogram(color = 'darkgrey', fill = '#1aa7ec', bins = 30)+ ggtitle("Histogram of log(Price/Size)") + 
+labs(x = "log(Price/Size)", y = "Count")  +  
+theme_cowplot(font_size = 12) + theme(plot.title = element_text(hjust = 0.5))
+
+log_transform_comparison <- plot_grid(pre_log_hist, after_log_size_hist, labels = c('A', 'B', 'C'), nrow = 1)
+log_transform_comparison
+
+
+
+#### Bedrooms and Bathrooms 
+hd %>% 
+group_by(Beds) %>% 
+   summarise (n = n()) %>%
+  mutate(freq = n / sum(n))
+
+hd %>% 
+group_by(Baths) %>% 
+   summarise (n = n()) %>%
+  mutate(freq = n / sum(n))
+
+# Scatter plots of beds and baths with price demonstrate the need for smooths 
+plt1_price <- ggplot(hd, aes(x = Beds, y = Pricem2)) + geom_point() + ggtitle('The number of Bathrooms and Price') 
+plt2_price <- ggplot(hd, aes(x = Baths, y = Pricem2)) + geom_point()+ ggtitle('The number of Bedrooms and Price')
+plot_grid(plt1_price, plt2_price)
+
+
+#### Size
+
+# Scatter plots of size and pricem2 demonstrate the need for smooths 
+plt_size_price <- ggplot(hd, aes(x = Size, y = Pricem2)) + geom_point()
+plt_size_price
+
+# Scatter plots of size and price 
+plt_size_price <- ggplot(hd, aes(x = Size, y = Price)) + geom_point()
+plt_size_price
+
+
+#### Ber Values 
+
+
+
+
+##-----------------------------------------------------------------------------
+# Summary Statistics: By County, Eircodes, Type 
+##-----------------------------------------------------------------------------
+
+#### By County 
+
+  # bar chart of counties count 
+  plt_county_bar <- ggplot(hd, aes(x = County)) +
+  geom_bar() +
+  labs(title = "Bar Chart of County Column",
+       x = "County",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_county_bar
+  
+  # price and county boxplot 
+  plt_cnty_price <- ggplot(hd, aes(x = County, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue') + 
+  ggtitle('Price across Counties') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_cnty_price
+  
+  # histograms of counties 
+  ggplot(hd, aes(y = County, x = Pricem2)) +
+    geom_density_ridges(fill = 'darkgreen') + 
+    labs(x = "Price", y = "County")
+  
+
+
+#### By Eircode
+  
+  # bar chart of eircodes count 
+  plt_eircode_bar <- ggplot(hd, aes(x = Eircode)) +
+  geom_bar() +
+  labs(title = "Bar Chart of Eircode Column",
+       x = "County",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_eircode_bar
+  
+  # price and county boxplot 
+  plt_eircode_price <- ggplot(hd, aes(x = Eircode, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue') + 
+  ggtitle('Price across Eircodes') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_eircode_price
+
+
+#### By Type 
+  
+  # Count in Type
+  plt_type_bar <- ggplot(hd, aes(x = PropertyType)) +
+  geom_bar() +
+  labs(title = "Bar Chart of County Column",
+       x = "County",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_type_bar
+  
+  # Property Type histograms  
+  ggplot(hd, aes(y = PropertyType, x = Pricem2)) +
+    geom_density_ridges(fill = 'darkgreen') + 
+    labs(x = "Price", y = "PropertyType")
+  
+  
+#### By BER 
+  
+  # bar chart of BER count 
+  plt_ber_bar <- ggplot(hd, aes(x = Ber)) +
+  geom_bar() +
+  labs(title = "Bar Chart of Ber Values",
+       x = "BER",
+       y = "Count") + theme_cowplot()
+  plt_ber_bar
+  
+  # price and BER boxplot 
+  plt_ber_price <- ggplot(hd, aes(x = Ber, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue') + 
+  ggtitle('Price across BER values') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  plt_ber_price
+  
+  
+  #### By Sub Area
+  # generalise cities in the data 
+  subarea_map_df <- hd_all
+  subarea_map_df$SubArea_org <-  hd_all$SubArea
+  subarea_map_df$SubArea[subarea_map_df$SubArea %in% c('Dublin', 'Cork', 'Limerick', 'Galway')] <- 'Cities'
+  subarea_map_df$SubArea.f <- as.factor(subarea_map_df$SubArea)
+
+    # bar chart of SubArea count 
+  plt_subarea_bar <- ggplot(hd_all, aes(x = SubArea)) +
+  geom_bar() +
+  labs(title = "Bar Chart of Observations by Area",
+       x = "Sub Area",
+       y = "Count") + theme_cowplot()
+  plt_subarea_bar
+  
+  # price and subarea boxplot 
+  plt_subarea_price <- ggplot(subarea_map_df[subarea_map_df$Price < 1000000,], aes(x = SubArea_org, y = Price, fill = SubArea.f)) +
+  geom_boxplot() + subarea_map_colours_fill + 
+  ggtitle('Price Across Areas') +  
+    labs(title = "Property Price Across Sub Areas",
+       x = "Sub Area",
+       y = "Property Price", 
+       fill = "") + 
+      scale_y_continuous(breaks = c(250000, 500000,750000,1000000), labels =c("250,000", "500,000", "750,000", "1,000,000")) + 
+  theme_cowplot(font_size = 16) + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  guides(fill = guide_legend(override.aes = list(size = 10))) 
+  plt_subarea_price
+ggsave(filename = 'scatter_bed_bath.png', path = './Presentation Figures', width = 30, height = 15, units = 'cm')
+
+
+
+  
+
+hd_all$PropertyType[hd_all$PropertyType == "End of Terrace"] <- 'End-of-Terrace'
+
+##-----------------------------------------------------------------------------
+# Summary Statistics: SubAreas
+##-----------------------------------------------------------------------------
+
+
+  total_vals <- hd_all %>%   summarise('Count' = n(), 
+            'Detached House' = sum(PropertyType == 'Detached'),
+            'Semi-Detached House' = sum(PropertyType == 'Semi-Detached'),
+            'Terraced House' = sum(PropertyType == 'Terraced'),
+            'End-of-Terrace House' = sum(PropertyType == 'End-of-Terrace'),
+            'Townhouse' = sum(PropertyType == 'Townhouse'),
+            'Apartment' = sum(PropertyType == 'Apartment'),
+            'Duplex Property' = sum(PropertyType == 'Duplex'),
+            'Median Price per $m^2$' = paste('\\euro', round(median(Pricem2),0)), 
+            #'Mean Number of Bedrooms' = round(mean(Beds),1), 
+            #'Mean Number of Bathrooms' = round(mean(Baths),1),
+            'Median Size $m^2$' = round(median(Size),0)) %>% 
+            mutate(across(.fns = ~big_mark(., big.mark = ",")))
+
+med_prices <- c('Count' = '', 
+            'Detached House' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Detached']),0))),
+            'Semi-Detached House' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Semi-Detached']),0))),
+            'Terraced House' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Terraced']),0))),
+            'End-of-Terrace House' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'End-of-Terrace']),0))),
+            'Townhouse' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Townhouse']),0))),
+            'Apartment' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Apartment']),0))),
+            'Duplex Property' = paste('\\euro', big_mark(round(median(hd_all$Pricem2[hd_all$PropertyType == 'Duplex']),0))),
+            'Median Price per $m^2$' = '', 
+            #'Mean Number of Bedrooms' = round(mean(Beds),1), 
+            #'Mean Number of Bathrooms' = round(mean(Baths),1),
+            'Median Size $m^2$' = '') 
+  
+subarea_summary <- hd_all %>% 
+  group_by(SubArea) %>% 
+  summarise('Count' = big_mark(n()), 
+            'Detached House' = big_mark(sum(PropertyType == 'Detached')),
+            'Semi-detached House' = big_mark(sum(PropertyType == 'Semi-Detached')),
+            'Terraced House' = big_mark(sum(PropertyType == 'Terraced')),
+            'End-of-terrace House' = big_mark(sum(PropertyType == 'End-of-Terrace')),
+            'Townhouse' = big_mark(sum(PropertyType == 'Townhouse')),
+            'Apartment' = big_mark(sum(PropertyType == 'Apartment')),
+            'Duplex Property' = big_mark(sum(PropertyType == 'Duplex')),
+            'Median Price per $m^2$' = paste('\\euro', big_mark(round(median(Pricem2),0))),
+            #'Mean Number of Bedrooms' = round(mean(Beds),1),
+            #'Mean Number of Bathrooms' = round(mean(Baths),1),
+            'Median Size $m^2$' = big_mark(round(median(Size),0))) %>%
+  rbind(c('SubArea' = 'Total', total_vals)) %>%
+  rbind(c('SubArea' = 'Median Price per $m^2$', med_prices))
+        
+names(subarea_summary)[names(subarea_summary) == 'SubArea'] <- 'Area'
+subarea_summary <- subarea_summary[, c(1, 3:9, 10, 11, 2)]
+
+
+kable(subarea_summary, booktabs = T, format = 'latex', 
+    caption = 'Summary of property types, property characteristics and price per $m^2$ in sub-markets',
+    linesep = "\\addlinespace", escape = F, label = 'subarea_stats') %>% 
+    kable_styling(full_width = T, 
+    latex_options = c('scale_down', font_size = 12)) %>% 
+    kableExtra::landscape() %>% 
+    row_spec(7,bold=T,hline_after = F) %>% 
+    column_spec(1, width = "2.5cm") %>%
+    column_spec(10, width = "1.2cm")
+  
+
+
+#### Plots in each subarea 
+unique_areas <- unique(hd_all$SubArea)
+month_price_plots <- list()
+size_price_plots <- list()
+bed_price_plots <- list()
+bath_price_plots <- list()
+type_price_plots <- list() 
+
+# Loop through each area to create and store the plots
+for (area in unique_areas) {
+  plot_data <- hd_all[hd_all$SubArea == area, ]
+
+    # scatterplot of month and price 
+  month_plot <- ggplot(plot_data, aes(x = as.factor(Month), y = Pricem2)) + geom_boxplot(fill = 'steelblue') +
+    theme_cowplot() +
+    labs(title = paste(area), x = "Month", y = "Price per M2")
+    
+  # scatterplot of size and price 
+  size_plot <- ggplot(plot_data, aes(x = Size, y = Pricem2)) + geom_point() +
+    theme_cowplot() +
+    labs(title = paste(area), x = "Size (m2)", y = "Price per M2")
+
+  # scatterplot of bedrooms and price 
+  beds_plot <- ggplot(plot_data, aes(x = Beds, y = Pricem2)) + geom_point() + 
+    theme_cowplot() + 
+    labs(title = paste(area), x = "Number of Bedrooms", y = "Price per M2")
+    
+  # scatterplot of bathrooms and price 
+  baths_plot <- ggplot(plot_data, aes(x = Baths, y = Pricem2)) + geom_point() +
+    theme_cowplot() + 
+    labs(title = paste(area), x = "Number of Bathrooms", y = "Price per M2")
+
+  # boxplot of type and price 
+  type_plot <- ggplot(plot_data, aes(x = PropertyType, y = Pricem2)) +
+    geom_boxplot(fill = 'steelblue') + 
+    theme_cowplot() + 
+    labs(title = paste(area), x = "Property Type", y = "Price per M2")+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+  month_price_plots[[area]] <- month_plot
+  size_price_plots[[area]] <- size_plot
+  bed_price_plots[[area]] <- beds_plot
+  bath_price_plots[[area]] <- baths_plot
+  type_price_plots[[area]] <- type_plot
+}
+
+# create plot grids 
+plot_month_areas <- add_title_grid(month_price_plots, 'Scatterplots of Months vs Price in Sub-Areas')
+plot_size_areas <- add_title_grid(size_price_plots, 'Scatterplots of Size vs Price in Sub-Areas')
+plot_beds_areas <- add_title_grid(bed_price_plots, 'Scatterplots of Beds vs Price in Sub-Areas')
+plot_baths_areas <- add_title_grid(bath_price_plots, 'Scatterplots of Baths vs Price in Sub-Areas')
+plot_type_areas <- add_title_grid(type_price_plots, 'Scatterplots of Type vs Price in Sub-Areas')
+
+
+##-----------------------------------------------------------------------------
+# Dummy Variables 
+##-----------------------------------------------------------------------------
+colnames(hd_all)
+
+# Attic 
+box_plot_attic <- ggplot(hd_all, aes(x = HasAttic, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Properties with Attic Conversions", x = 'Attic Conversion', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_attic
+
+# Garden 
+box_plot_garden <- ggplot(hd_all, aes(x = HasGarden, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Properties with Gardens", x = 'Garden', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_garden
+
+# HasCulDeSac 
+box_plot_cds <- ggplot(hd_all, aes(x = HasCulDeSac, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Properties with Cul de Sac", x = 'Cul de Sac', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_cds
+
+# HasGarage 
+box_plot_garage <- ggplot(hd_all, aes(x = HasGarage, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Properties with Garage", x = 'Garage', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_garage
+
+# IsRenovated 
+box_plot_renovated <- ggplot(hd_all, aes(x = IsRenovated, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Properties with Renovatoin", x = 'IsRenovated', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_renovated
+
+# IsPeriod 
+box_plot_period <- ggplot(hd_all, aes(x = IsPeriod, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Period Properties", x = 'Period Property', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_period
+
+# IsSouthFacing 
+box_plot_south <- ggplot(hd_all, aes(x = IsSouthFacing, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of South Facing Properties", x = 'South Facing', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_south
+
+# IsNew 
+box_plot_isnew <- ggplot(hd_all, aes(x = IsNew, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Property Condition", x = 'New', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_isnew
+
+# IsGroundFlrApt 
+box_plot_ground_apt <- ggplot(hd_all[hd$PropertyCategory=='Apartment',], aes(x = IsGroundFlrApt, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Apartments", x = 'Ground Floor', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_ground_apt
+
+# IsSecondFlrApt 
+box_plot_second_apt <- ggplot(hd_all[hd$PropertyCategory=='Apartment',], aes(x = IsSecondFlrApt, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Apartments", x = 'Second Floor', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_second_apt
+
+# IsPenthouseApt 
+box_plot_penthouse_apt <- ggplot(hd_all[hd$PropertyCategory=='Apartment',], aes(x = IsPenthouseApt, y = Pricem2)) +
+  geom_boxplot(fill = 'steelblue')  +
+  labs(title = "Price (€) of Apartments", x = 'Penthouse', y = 'Price m2 €)') +
+  theme_cowplot(font_size = 16)   +
+  theme(plot.title = element_text(hjust = 0.5))
+box_plot_penthouse_apt
+
+
+
+
+##-----------------------------------------------------------------------------
+# Maps
+##-----------------------------------------------------------------------------
+
+# Price in Country 
+map_price_counties <- map_roi_counties + 
+  geom_point(data = hd_all, aes(x = Longitude_Original, y = Latitude_Original, color = log(Pricem2)), size = 0.3) + 
+  # scale_color_viridis(begin = 0.3, end = 1, option = "H", breaks = c(2000, 10000), labels = c('€2,000', '€10,000')) +
+  # scale_color_brewer(type = "qual", palette = 'RdYlGn') +
+  # scale_color_gradientn(colours = rainbow(4)) + 
+    scale_color_bin(palette = "RedsYwGr", discrete = F, reverse = T, 
+                    breaks = c(1, 4), labels = c("Low-Priced", "High-Priced")) + 
+  theme(legend.position = "right", legend.key.width = unit(0.3, 'cm'), legend.spacing.x = unit(0.1, 'cm'),
+        legend.key.height = unit(0.3, 'cm'), 
+        legend.justification = 'center', legend.text = element_text(size = 8),
+        legend.title = element_text(size = 10)) + 
+  labs(color = "Median Price \nper Sqm (€)") 
+  # ggtitle('Median Residential Property Prices \nof Eircodes') +   
+  # theme(plot.title = element_text(hjust = 0.1, vjust = -10, color = 'black', size = 10)) +  
+map_price_counties
+
+
+## Median Price for each County 
+  
+  # Median Price in counties  
+  county_median <- hd_all %>%
+    group_by(County) %>%
+    summarize(median_price = round(median(Pricem2), 0))
+  
+  # create a dataset with medians and polygons for counties 
+  c.med_map_data <- merge(roi_counties_sf, county_median, by =  "County")
+  centroids <- st_centroid(c.med_map_data)
+  
+  # extract the centroids to assign the label to 
+  centroids$longitude <- st_coordinates(centroids)[, "X"]
+  centroids$latitude <- st_coordinates(centroids)[, "Y"]
+  
+  map_median_cnty <- ggplot() + 
+    geom_sf(data = c.med_map_data, aes(fill = median_price), color = "white", size = 1) + 
+    theme_map() +
+    scale_fill_viridis(begin = 0.6, end = 1, option = "viridis", breaks = c(2000, 4000), labels = c('Low', 'High')) +
+    geom_text(data = centroids, aes(x = longitude, y = latitude, label = paste(County, '\n€', median_price)), 
+              size = 3, color = 'black', fontface = "bold") + 
+    theme(legend.position = "bottom", legend.key.width = unit(1, 'cm'), legend.spacing.x = unit(0.5, 'cm'),
+          legend.justification = 'center', legend.text = element_text(size = 10),
+          legend.title = element_text(size = 16)) + 
+    ggtitle('Median Residential Property Prices\nof Counties') +   
+    theme(plot.title = element_text(hjust = 0.1, vjust = -10, color = 'black', size = 10)) + 
+    labs(fill = "Median Price per Sqm (€)", color = "black")
+  map_median_cnty
+#  ggsave(filename = 'median_price_counties.png', path = './Figures', width = 25, height = 30, units = 'cm')
+  
+  
+  ## Median Price for each Eircode 
+    ## Median Price for each Eircode 
+  
+  eircode_median <- hd_all %>%
+    group_by(Eircode) %>%
+    summarize(median_price = round(median(Pricem2), 0))
+  
+  # create a dataset with medians and polygons for counties 
+  e.med_map_data <- merge(eircodes_sf, eircode_median, by =  "Eircode")
+  sf_use_s2(F)
+  centroids <- st_centroid(e.med_map_data)
+  
+  # extract the centroids to assign the label to 
+  centroids$longitude <- st_coordinates(centroids)[, "X"]
+  centroids$latitude <- st_coordinates(centroids)[, "Y"]
+
+  map_median_ecode <- ggplot() + 
+    geom_sf(data = e.med_map_data, aes(fill = median_price), color = "lightgrey", size = 0.5) + 
+    theme_map() +
+    scale_fill_bin(palette = "RedsYwGr", discrete = F, reverse = T, 
+                   labels = scales::dollar_format(suffix = "", prefix = "€", big.mark = ",")) + 
+    theme(legend.position = c(0.9, 0.9),
+          legend.text = element_text(size = 16),
+          legend.key.width = unit(0.6, 'cm'), 
+          legend.spacing.x = unit(0.1, 'cm'),
+          legend.key.height = unit(0.4, 'cm'),
+          legend.title = element_text(size = 18),
+          legend.justification = c("right", "top"),
+          legend.box.just = "right") + 
+    labs(fill = expression("Median Price"~m^2), color = "black") 
+map_median_ecode_lbls <-  map_median_ecode + city_labels + limerick_segment + galway_segment + dublin_segment + cork_segment
+map_median_ecode_lbls
+ggsave(filename = 'map_median_ecode.png', path = './Figures', width = 30, height = 30, units = 'cm')
+
+
+
+#### Eircode Median map in Dublin 
+
+  # Extract dublin eircodes 
+  dub_e.med_map_data <- e.med_map_data[grepl('D', e.med_map_data$Eircode, ignore.case = T, perl = T), ]
+  dub_centroids <- st_centroid(dub_e.med_map_data)
+  
+  # extract the centroids to assign the label to 
+  dub_centroids$longitude <- st_coordinates(dub_centroids)[, "X"]
+  dub_centroids$latitude <- st_coordinates(dub_centroids)[, "Y"]
+  
+  # get label of eircode for geom_text 
+  dub_centroids$Eircode <- dub_e.med_map_data$Eircode
+  dub_map_median_ecode <- ggplot() + 
+    geom_sf(data = dub_e.med_map_data, aes(fill = median_price), color = "lightgrey", size = 0.5) + 
+    theme_map() +
+    geom_text(data = dub_centroids, aes(x = longitude, y = latitude, label = Eircode), 
+              size = 3, color = 'black', vjust = 1, fontface ='bold') + 
+    scale_fill_bin(palette = "RedsYwGr", discrete = F, reverse = T, 
+                   labels = scales::dollar_format(suffix = "", prefix = "€", big.mark = ","))  + 
+  theme(legend.position = c(1.05, 0.55),
+        legend.text = element_text(size = 12),
+        legend.key.width = unit(0.4, 'cm'),
+        legend.spacing.x = unit(0.1, 'cm'),
+        legend.key.height = unit(0.4, 'cm'),
+        legend.title = element_text(size = 14),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        plot.title = element_text(hjust = 0.5)) +
+    labs(fill = expression("Median Price"~m^2), color = "black", title = 'Eircode Regions in Dublin')
+dub_map_median_ecode
+
+
+
+#### Eircode Median map in Cork 
+
+  # extract cork eircodes
+  cork_eircodes <- c('T23', 'T34', 'T45', 'P24', 'T12', 'P31')
+  cork_e.med_map_data <- e.med_map_data[e.med_map_data$Eircode %in% cork_eircodes,]
+  cork_centroids <- st_centroid(cork_e.med_map_data)
+  
+  # extract the centroids to assign the label to 
+  cork_centroids$longitude <- st_coordinates(cork_centroids)[, "X"]
+  cork_centroids$latitude <- st_coordinates(cork_centroids)[, "Y"]
+  cork_centroids$Eircode <- cork_e.med_map_data$Eircode
+  cork_map_median_ecode <- ggplot() + 
+    geom_sf(data = cork_e.med_map_data, aes(fill = median_price), color = "lightgrey", size = 0.5) + 
+    theme_map() +
+    geom_text(data = cork_centroids, aes(x = longitude, y = latitude, label = Eircode), 
+              size = 3, color = 'black', fontface = 'bold') + 
+    scale_fill_bin(palette = "RedsYwGr", discrete = F, reverse = T, 
+                   labels = scales::dollar_format(suffix = "", prefix = "€", big.mark = ",")) + 
+  theme(legend.position = c(0.97, 0.95),
+        legend.text = element_text(size = 12),
+        legend.key.width = unit(0.4, 'cm'),
+        legend.spacing.x = unit(0.1, 'cm'),
+        legend.key.height = unit(0.4, 'cm'),
+        legend.title = element_text(size = 14),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        plot.title = element_text(hjust = 0.5)) +
+  labs(fill = expression("Median Price"~m^2), color = "black", title = 'Eircode Regions in Cork')
+cork_map_median_ecode
+
+cork_dub_eircode_maps <- plot_grid(dub_map_median_ecode, cork_map_median_ecode, nrow = 2)
+cork_dub_eircode_maps
+
+ggsave(filename = 'cork_dub_eircode_maps.png', path = './Figures', width = 20, height = 30, units = 'cm')
+
+
+
+## Property Types map 
+
+# detached, semi-d, terrace, apt, other
+prop_type_map_data <- hd_sf[hd_sf$PropertyType %in% c('Detached', 'Semi-Detached', 'Apartment', 'Duplex'), ]
+value_mapping <- c('Duplex'= 'Apartment')
+prop_type_map_data <- prop_type_map_data %>%
+  mutate(PropertyType = recode_factor(PropertyType, !!!value_mapping))
+
+table(prop_type_map_data$PropertyType)
+
+
+# Plot of property types - All
+property_type_map <- map_roi_counties + 
+  ggtitle("Popular Property Types in Ireland") +
+  geom_sf(data = prop_type_map_data, aes(color = PropertyType), size = 0.5) + 
+  labs(color = 'Property Type') + theme_map() + 
+  theme(plot.title = element_text(hjust = 0.5, vjust = -4, size = 12)) +   
+  theme(legend.position = "right", legend.justification = 'center', legend.text = element_text(size = 10), legend.title = element_text(size = 10))  
+property_type_map
+
+
+
+#### SubArea Map 
+
+subarea_map <- map_roi_counties +
+geom_point(data = subarea_map_df,  aes(x = Longitude_Original, y = Latitude_Original, color = SubArea.f), size = 1) +
+  subarea_map_colours +
+  theme_map() +
+  guides(color = guide_legend(override.aes = list(size = 8))) +
+ labs(color = "Area") + 
+    theme(legend.position = c(0.7,0.8))
+
+subarea_map
+
+# create labels for each city 
+city_labels_df <- data.frame(
+  label = c("Limerick", "Galway", "Dublin", "Cork" ),
+  longitude = c(-10.5, -10.5, -5.5, -8),
+  latitude = c(52.5, 53.3, 53.5, 51.5)
+)
+city_labels <-   geom_label(color = 'black', alpha = 1, family = "sans", data = city_labels_df, aes(x = longitude, y = latitude, label = label),  size = 3.2) 
+# create line segments for the labels 
+limerick_segment <- geom_segment(aes(x = -10.5+0.2, y = 52.5-0.0035, xend = -8.65, yend = 52.64),
+               arrow = arrow(length = unit(0.1, "cm")), 
+               color = "black")
+galway_segment <- geom_segment(aes(x = -10.5+0.15, y = 53.3-0.0035, xend = -9.15, yend = 53.27),
+               arrow = arrow(length = unit(0.1, "cm")), 
+               color = "black")
+dublin_segment <- geom_segment(aes(x = -5.5-0.15, y = 53.5-0.0035, xend = -6.2, yend = 53.35),
+               arrow = arrow(length = unit(0.1, "cm")), 
+               color = "black")
+cork_segment <- geom_segment(aes(x = -8, y = 51.5+0.015, xend = -8.45, yend = 51.85),
+               arrow = arrow(length = unit(0.1, "cm")), 
+               color = "black")
+
+subarea_map_lbls <- subarea_map + city_labels + limerick_segment + galway_segment + dublin_segment + cork_segment
+ggsave(filename = 'subarea_map_lbls.png', path = './Figures', width = 30, height = 30, units = 'cm')
+
+
+
+
+
+
+```
+
+
+
+# Simple Linear Model
+
+```{r Simple Linear Model, include=FALSE}
+
+#### Run a linear regression 
+lm <- lm(LogPricem2 ~ Beds + Baths + Size + PropertyType.f + IsPenthouseApt + 
+            IsSecondFlrApt + HasAttic + HasGarden + IsPeriod + IsRenovated + 
+            HasCulDeSac + HasGarage + IsNew + IsGroundFlrApt + IsSouthFacing +
+            SubArea.f + Month.f + Ber.f, data = hd_all)
+saveRDS(lm, file = here('./Models RData/lm.rds'))
+lm <- readRDS('./Models RData/lm.rds')
+summary(lm)
+plot(lm)
+
+exp(coefficients(lm))
+
+lm_morans <- Moran.I(lm$residuals, inv_dist_matrix)
+write.csv(lm_morans, './Model Results/lm_morans.csv', row.names = F) 
+
+
+## -- Cross Validation --
+
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+results <- c()
+area_results <- list()
+strata_results <- list()
+rf_area_cv <- c()
+rf_strata_cv <- c()
+
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+    
+  # train the model 
+  lm <- lm(LogPricem2 ~ Beds + Baths + Size + PropertyType.f + IsPenthouseApt + 
+            IsSecondFlrApt + HasAttic + HasGarden + IsPeriod + IsRenovated + 
+            HasCulDeSac + HasGarage + IsNew + IsGroundFlrApt + IsSouthFacing +
+            SubArea.f + Month.f + Ber.f, data = train_data)
+  print(paste('modelling complete: ', i))
+    
+  # Overall results 
+  results <- rbind(results, lm_model_metrics(lm, test_data))
+  
+  # results in subareas 
+  for (area in unique_areas){
+    
+    area_data <- test_data[test_data$SubArea == area,]
+    area_results[[area]] <- rbind(area_results[[area]],
+                                  lm_model_metrics(lm, area_data))
+  }
+  
+  # results across price strata 
+  for (strata in unique_strata){
+    
+    strata_data <- test_data[test_data$PriceStrata == strata,]
+    strata_results[[strata]] <- rbind(strata_results[[strata]],
+                                  lm_model_metrics(lm, strata_data))
+  }
+  print(paste('results complete: ', i))
+}
+
+#final cross validation results
+lm_cv <- round(colSums(results)/5, 2)
+results <- rbind(results, mean = lm_cv)
+write.csv(results, here('./Model Results/lm_cv_all_results.csv'), row.names = T) 
+
+#final cross validation results in area 
+lm_area_cv <- sapply(area_results, colSums)/5
+write.csv(lm_area_cv, here('./Model Results/lm_cv_results_subareas.csv'), row.names = T) 
+
+#final cross validation results in strata 
+lm_strata_cv <- sapply(strata_results, colSums)/5
+write.csv(lm_strata_cv, here('./Model Results/lm_cv_results_strata.csv'), row.names = T) 
+
+
+
+
+
+
+### -- Cross Validation Full DF --
+
+n_folds <- 5
+folds <- createFolds(hd_all$Longitude, n_folds) 
+lm_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(lm_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+    print(Sys.time())
+  
+  # train the model 
+    lm <- lm(LogPricem2 ~ Beds + Baths + Size + PropertyType.f + IsPenthouseApt + 
+            IsSecondFlrApt + HasAttic + HasGarden + IsPeriod + IsRenovated + 
+            HasCulDeSac + HasGarage + IsNew + IsGroundFlrApt + IsSouthFacing +
+            SubArea.f + Month.f + Ber.f, data = train_data)
+  
+    print(paste('modelling complete: ', i))
+      print(Sys.time())
+    
+    # overall results df 
+    resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                             Actual = test_data$Price, 
+                             PriceStrata = test_data$PriceStrata, 
+                             SubArea = test_data$SubArea) %>%
+                  mutate(lm_model_metrics_df(lm, test_data))
+    
+      # overall results 
+    lm_cv_df <- rbind(lm_cv_df, resutls_df)
+    print(paste('results compelte: ', i))
+      print(Sys.time())
+  
+}
+lm_cv_df$Size <- hd_all$Size
+write.csv(lm_cv_df, here('./Model Results/lm_cv_df.csv'), row.names = T) 
+
+
+# Analyse CV results 
+lm_cv_df <- readr::read_csv(here('./Model Results/lm_cv_df.csv'))
+lm_cv_metrics <- analyse_cv_results(lm_cv_df)
+
+# Anlyse in Subareas 
+lm_cv_metrics_area <- analyse_cv_results_areas(lm_cv_df)
+
+# Anlyse in Strata 
+lm_cv_metrics_strata <- analyse_cv_results_strata(lm_cv_df)
+
+
+
+
+```
+
+
+
+# Simple GAM Model
+
+```{r Simple GAM Model, include=FALSE}
+
+
+##-----------------------------------------------------------------------------
+# gam.irl1
+
+# Non spatial GAM
+# All data 
+##-----------------------------------------------------------------------------
+
+
+#### Train the Model  
+gam.irl1 <- mgcv::gam(LogPricem2 ~  s(Beds, bs = "cr", k = 7) + 
+                        s(Baths, bs = "cr", k = 7) + 
+                        s(Size, bs = "cr", k = 20) + 
+                        s(Month, bs="ps", m=c(1,1)) +
+                        Ber.f + PropertyType.f + SubArea.f  + 
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew,
+                        drop.unused.levels = FALSE,
+                      data = hd_all, method = "ML")
+
+gam.irl1$smooth
+par(mfrow=c(1,2))
+plot(gam.irl1, shade=T, term = 1, rug=FALSE, ylim = c(-0.02, 0.02))
+termplot(Gam1, se=T, ylim=c(-5000, 30000), ask=F, col.term = 1, col.se = 1)
+par(mfrow=c(1,1))
+
+pred = predict(gam.irl1, newdata=hd_all, type="response")
+
+
+gratia::draw(gam.irl1)
+
+## Model Summaries 
+summary(gam.irl1)
+anova(gam.irl1)
+data.frame(exp(coefficients(gam.irl1)))
+
+
+dd <- data.frame(x = c(1:11), y = data.frame(coefficients(gam.irl1))[33:43,1])
+plot(dd$x, exp(dd$y))
+
+month_spline <- data.frame(exp(coefficients(gam.irl1)))[10, ]
+
+## Residuals  
+# standard plot 
+plot_gam.irl1_resid <- plot(gam.irl1$fitted.values, gam.irl1$residuals)
+hist(gam.irl1$residuals)
+gam.check(gam.irl1)
+
+# Map of residuals 
+gam.irl1_resid <- plot_gam_resid(gam.irl1, hd_all, 'aaa')
+
+## Splines 
+draw(gam.irl1)
+
+
+
+
+
+##-----------------------------------------------------------------------------
+# gam.irl2
+
+# Spatial GAM
+# All data 
+##-----------------------------------------------------------------------------
+
+#### Train the Model 
+gam.irl2 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 5) + 
+                    s(Baths, bs = "cr", k = 5) +
+                    s(Size, bs = "cr", k = 20) + 
+                    s(Month, bs="ps", m=c(1,1)) +
+                    Ber.f + PropertyType.f + SubArea.f + Month + 
+                    HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                    IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                    IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                    s(Longitude, Latitude, bs = 'gp', k = 100),  data = hd_all, method = "ML")
+
+## Model summaries 
+summary(gam.irl2)
+
+## Plot the residuals 
+plot(gam.irl2$fitted.values, gam.irl2$residuals)
+hist(gam.irl2$residuals)
+gam.check(gam.irl2)
+
+# Map of residuals 
+gam.irl2_resid <- plot_gam_resid(gam.irl2, hd_all, 'GAM.irl2 Residuals\nlog Price m2')
+
+
+## Plot the splines 
+draw(gam.irl2)
+
+vis.gam(gam.irl2, view = c("Latitude", "Longitude"), 
+        theta = 50, n.grid = 50, lwd = .4)
+
+
+## Heatmap of spatial surface 
+gam.irl2_maps <- create_heatmap(gam.irl2, hd_all)
+gam.irl2_map_obs <- gam.irl2_maps[[1]]
+gam.irl2_map_n.obs <- gam.irl2_maps[[2]]
+
+```
+
+
+# Cross Validation for k
+
+```{r Cross Validation for k, include=FALSE}
+
+# create 10 folds of data (indexes)
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+
+
+cv_metrics <- function(model, test_data){
+  size <- test_data$Size
+  act.price <- test_data$Price
+  
+  predictions <- predict(model, newdata = test_data, se.fit = T)
+  preds.fit <- predictions$fit
+  preds.se <- predictions$se.fit
+  
+  pred.price <- exp(preds.fit)*size
+ 
+  rsq.acc <- cor(pred.price, act.price)^2
+  rmse.acc <- Metrics::rmse(act.price, pred.price)
+  results <- data.frame('rsq' = rsq.acc, 'rmse' = rmse.acc)
+  return(results)
+}
+
+
+# Looking to find a "good" k
+ks <- c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 250, 300)
+# ks <- cbind.data.frame(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+
+knot_results <- c()
+
+for(j in seq_along(ks)){
+  print(paste('Knot value', ks[j]))
+  results <- c()
+  cv_results <- c()
+  
+  for (i in 1:n_folds){
+    
+    # create training and test 
+    train <- hd_all[-folds[[i]], ]
+    test <- hd_all[folds[[i]], ] 
+    
+    # triain the model 
+    gam.irl2 <- mgcv::gam(LogPricem2 ~ s(Longitude, Latitude, bs = 'gp', k = ks[j], m = 2) +
+                        s(Beds, bs = "cr", k = 5) + s(Baths, bs = "cr", k = 5) +
+                        s(Size, bs = "cr", k = 20) + PropertyType.f,  data = train, method = "ML")
+    plot(gam.irl2, pages = 1)
+    
+    # calculate rsq and rmse and add to the cv results 
+    results <- rbind(results, cv_metrics(gam.irl2, test))
+  }
+  
+      # after 10 iterations, store the mean values 
+      cv_results <- data.frame('rsq' = mean(results$rsq), 'rmse' = mean(results$rmse))
+      # keep the k value and cv results 
+      knot_results <- rbind(knot_results, c(k = ks[j], cv_results))
+}
+
+write.csv(knot_results, './Model Results/gam.irl2_knot_results.csv', row.names = F) 
+
+optimal_k <- 60 
+
+```
+
+
+# Subgroup GAM Model
+
+```{r Subgroup GAM Model, include=FALSE}
+
+##-----------------------------------------------------------------------------
+# gam.sub
+
+# Spatial GAM
+# All data by subareas 
+##-----------------------------------------------------------------------------
+
+#### Train the Model 
+tictoc::tic()
+gam.sub <- mgcv::gam(LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                        s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                        s(Size, bs = "cr", k = 20, by = SubArea.f) + 
+                        s(Month, bs="ps", m=c(1,1), by = SubArea.f) +
+                        SubArea.f + # for identifiability
+                        PropertyType.f*SubArea.f + 
+                        Ber.f +
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = 60, m = 2),  
+                    data = hd_all, method = "ML")
+tictoc::toc()
+
+## model summaries 
+summary(gam.sub)
+
+## Plot the residuals 
+plot(gam.sub$fitted.values, gam.sub$residuals)
+hist(gam.sub$residuals)
+
+gam.check(gam.sub)
+
+# residual map 
+gam.sub_resid <- plot_gam_resid(gam.sub, hd_all, map = map_roi_counties, title = 'gam.sub Residuals\nLog Price m2')
+  
+# plot splines 
+gratia::draw(gam.sub)
+plot(gam.sub, select = 20)
+
+
+#### Plot the relative scalings across subareas 
+  # extract the means for each area by types 
+  grid_TypeArea <- emmeans(gam.sub, c('PropertyType.f', 'SubArea.f'), by = 'SubArea.f', 
+                  nuisance = c('IsNew', 'IsGarage', 'IsGroundFlrApt' ,'IsPenthouseApt', 
+                               'HasAttic', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 'HasCulDeSac'))
+  coeff_TypeArea <- summary(contrast(grid_TypeArea, method= 'eff')) # sum to zero effects 
+  
+  # create a df with area, type, value, confidence intervals 
+  coeff_df_TypeArea <- data.frame(area = coeff$SubArea, 
+                                   contrast = coeff$contrast, 
+                                   coeff = exp(coeff$estimate), 
+                                   lower = exp(coeff$estimate - 1.96*coeff$SE), 
+                                   upper = exp(coeff$estimate + 1.96*coeff$SE)) %>% 
+                        arrange(coeff)
+  
+  coeff_df_TypeArea$contrast <- gsub(" effect", "", coeff_df_TypeArea$contrast)
+  
+  # Create plots for each SubArea 
+  gam_sub1_TypeArea_plots <- list()
+  
+  # Loop through each area to create and store the plots
+  for (area in unique_areas) {
+    condition_coeff_mini <- coeff_df_TypeArea[coeff_df_TypeArea$area == area, ]
+    
+    plot <- ggplot(condition_coeff_mini, aes(reorder(contrast, coeff), coeff)) + 
+            geom_point() +
+            geom_linerange(aes(ymin = lower, ymax = upper)) + 
+            geom_abline(intercept = 1, slope = 0, color = "grey", linetype = "dotted") + # Line representing the grand mean 
+            theme_cowplot(font_size = 12) +
+            theme(plot.title = element_text(hjust = 0.5),
+                  axis.text.x = element_text(angle = 45, hjust = 1)) + 
+            labs(title = paste("Relative Scalings of Property Condition in", area), x = "Property Condition", y = "Multiplicative Scaling")
+          
+    gam_sub1_TypeArea_plots[[area]] <- plot
+  }
+  
+  # Combine the plots into a grid
+  TypeArea_scalings <- plot_grid(plotlist = gam_sub1_TypeArea_plots)
+  
+
+  
+#### Plot the relative scalings of Ber 
+  # extract the means for each area by types 
+  grid_Ber<- emmeans(gam.sub, ~ Ber.f, 
+                     nuisance = c('IsNew', 'IsGarage', 'IsGroundFlrApt' ,'IsPenthouseApt', 
+                               'HasAttic', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 'HasCulDeSac'))
+  
+  coeff_Ber <- summary(contrast(grid_Ber, method= 'eff')) # sum to zero effects 
+  
+  # create a df with area, type, value, confidence intervals 
+  coeff_Ber <- data.frame(contrast = coeff_Ber$contrast, 
+                          coeff = exp(coeff_Ber$estimate), 
+                          lower = exp(coeff_Ber$estimate - 1.96*coeff_Ber$SE), 
+                          upper = exp(coeff_Ber$estimate + 1.96*coeff_Ber$SE))
+  coeff_Ber$contrast <- gsub(" effect", "", coeff_Ber$contrast)
+  
+  # Create plot of Ber scalings 
+  gam_sub1_Ber_plot <- ggplot(coeff_Ber, aes(contrast, coeff)) + 
+                       geom_point() +
+                       geom_linerange(aes(ymin = lower, ymax = upper)) + 
+                       geom_abline(intercept = 1, slope = 0, color = "grey", linetype = "dotted") + # Line representing the grand mean 
+                       theme_cowplot() +
+                       theme(plot.title = element_text(hjust = 0.5),
+                       axis.text.x = element_text(angle = 45, hjust = 1)) + 
+                       labs(title = paste("Relative Scalings of BER values"), x = "BER", y = "Multiplicative Scaling")
+  gam_sub1_Ber_plot
+
+  
+#### Model coefficients 
+  gam.sub
+
+
+#### Create a heatmap of spatial surface 
+    # Create predicition data - new coordinates, size, 0 bed and 0 bath
+  Pred.coord <- data.frame(Longitude= coords.new.km[,1] ,Latitude = coords.new.km[,2],
+                           Size= rep(mean(hd_all$Size),ngrid*ngrid),
+                           PropertyType.f = rep(hd_all$PropertyType[1],ngrid*ngrid),
+                           Beds=rep(0,ngrid*ngrid),
+                           Baths=rep(0,ngrid*ngrid), 
+                           SubArea.f = rep('Rural', ngrid*ngrid), 
+                           Ber.f = 'C1', 
+                           Month = 6, 
+                           HasAttic = F, 
+                           HasGarden = F, HasCulDeSac = F,HasGarage = F,
+                        IsRenovated= F, IsPeriod= F, IsSouthFacing= F, IsGroundFlrApt= F, 
+                        IsSecondFlrApt= F, IsPenthouseApt= F, IsNew= F) 
+  
+  
+gam.sub_maps <- create_heatmap(gam.sub, Pred.coord, newd = newd)
+gam.sub_map_obs <- gam.sub_maps[[1]]
+gam.sub_map_n.obs <- gam.sub_maps[[2]]
+
+```
+
+# GAM1: MRF Eircode Model
+
+``` {r MRF Eircode Model, warning = F}
+
+### Prepare the Eircode Poylgons 
+  # extract number of eircodes and geometries 
+  n_ec <- dim(unique(eircodes_sf))[1]
+  ec_geom <- eircodes_sf$geometry
+  
+  # craete a list of polygons for eircodes 
+  eircodes_poly <- list()
+  for (i in 1:n_ec){
+    coords <- ec_geom[[i]][[1]][[1]][, 1:2]
+    eircodes_poly[[i]] <- coords
+  }
+  
+  # name the list elemetns as the eircodes 
+  names(eircodes_poly) <- eircodes_sf$Eircode
+  
+
+##-----------------------------------------------------------------------------
+# gam.ec.MRF
+
+# MRF GAM
+# Eircodes Only 
+##-----------------------------------------------------------------------------
+
+#### Train the Model 
+gam.ec.MRF <- mgcv::gam(drop.unused.levels=FALSE, LogPricem2 ~ s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                    data = hd_all, method = "ML")
+
+#### Plot the MRF surface  
+# extract the data 
+gam.ec.MRF_plot_dat <- plot(gam.ec.MRF)
+# the values from the eircode, add to the shapefile 
+ec_values <- gam.ec.MRF_plot_dat[[1]]$fit
+ec_values_map_data <- cbind(eircodes_sf, ec_values)
+
+# Make the map 
+gam.ec.MRF_map <- map_counties + 
+  geom_sf(data = ec_values_map_data, aes(fill = ec_values), color ='white' , size = 1)  + 
+  theme_map() + 
+  scale_fill_viridis(begin = 0.6, end = 1, option = "viridis") + ggtitle('MRF k = 139')
+gam.ec.MRF_map
+
+
+##-----------------------------------------------------------------------------
+# gam.MRF
+
+# MRF Spatial GAM
+# All data 
+##-----------------------------------------------------------------------------
+
+## Create a random sample - delete this code
+rand_row <- sample(1:nrow(hd_all), 0.4 * nrow(hd_all))
+hd_all1 <- hd_all[rand_row, ]
+
+
+## Train the model 
+tictoc::tic()
+gam.MRF <- mgcv::gam(LogPricem2 ~ s(Beds, k = 8) + 
+                        s(Baths, bs = "cr", k = 7) +
+                        s(Size, bs = "cr", k = 20) + 
+                        s(Month, bs="ps", m=c(1,1)) +
+                        PropertyType.f + Ber.f + 
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = 60, m = 2) + 
+                        s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                    data = hd_all, method = "ML")
+tictoc::toc()
+saveRDS(gam.MRF, file = here('./Models RData/g1.rds'))
+gam.MRF <- readRDS('./Models RData/g1.rds')
+g1_morans <- Moran.I(gam.MRF$residuals, inv_dist_matrix)
+write.csv(g1_morans, './Model Results/g1_morans.csv', row.names = F) 
+
+
+## Model summaries 
+summary(gam.MRF)
+
+## Plot the splines 
+draw(gam.MRF)
+
+
+## Plot the MRF surface  
+# extract the data 
+gam.MRF_plot_dat <- plot(gam.MRF)
+# the values from the eircode, add to the shapefile 
+ec_values <- gam.MRF_plot_dat[[6]]$fit
+ec_values_map_data <- cbind(eircodes_sf, ec_values)
+
+# Make the map 
+gam.MRF_map <- map_counties + 
+  geom_sf(data = ec_values_map_data, aes(fill = ec_values), color ='white' , size = 1)  + 
+  theme_map() + 
+  scale_fill_viridis(begin = 0.6, end = 1, option = "viridis") + ggtitle('MRF k = 139')
+
+
+
+``` 
+
+
+# GAM1: Cross Validation for k
+
+```{r Cross Validation for k MRF Model, include=FALSE}
+
+# create 10 folds of data (indexes)
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+
+
+
+## K for the Size Variable 
+# Looking to find a "good" k
+k_size <- c(5, 10, 20, 30, 60, 80, 100, 150)
+k_location <- c(5, 10, 20, 30, 60, 80, 100, 150, 300, 500)
+k_mrf <- c(5,10, 20, 30, 60, 80, 100, 120, 139)
+
+size_knot_results <- c()
+size_knot_cv_results <- c()
+
+tictoc::tic()
+for(j in seq_along(k_size)){
+  
+  print(paste('Knot value: ', k_size[j]))
+  results <- c()
+  cv_results <- c()
+   
+  # Run 5 fold CV 
+  # for (i in 1:n_folds){
+  i = 1 # 20:80 test split 
+    
+    # create training and test 
+    train_data <- hd_all[-folds[[i]], ]
+    test_data <- hd_all[folds[[i]], ] 
+    
+    # train the model 
+    gam.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                         LogPricem2 ~ s(Beds, k = 8) + 
+                         s(Baths, bs = "cr", k = 7) +
+                         s(Size, bs = "cr", k = k_size[[j]]) + 
+                         s(Month, bs="ps", m=c(1,1)) +
+                         PropertyType.f + Ber.f + 
+                         HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                         IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                         IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                         s(Longitude, Latitude, bs = 'gp', k = 60, m = 2) + 
+                         s(Eircode.f, bs = 'mrf', k = 139, xt = list(polys = eircodes_poly)),
+                        data = train_data, method = "ML")
+    
+      print(paste('Model fitted for size k = ', k_size[j], sep = ''))
+      
+      # calculate rsq and rmse and add to the cv results 
+      results <- rbind(results, c(k_size = k_size[j], gam_model_metrics(gam.MRF, test_data)))
+    # } 
+      
+      # after all iterations, store the mean values 
+      size_knot_cv_results <- rbind(size_knot_cv_results, results)
+}
+tictoc::toc()
+
+
+opt_k_size <- 40 ## INPUT BEST VALUE HERE 
+
+
+## K for the Location Variable 
+location_knot_results <- c()
+location_knot_cv_results <- c()
+
+for(j in seq_along(k_location)){
+  print(paste('Knot value: ', k_location[j]))
+  results <- c()
+  cv_results <- c()
+   
+  # Run 5 fold CV 
+  # for (i in 1:n_folds){
+  i = 1
+    # create training and test 
+    train_data <- hd_all[-folds[[i]], ]
+    test_data <- hd_all[folds[[i]], ] 
+    
+    # train the model 
+    gam.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                         LogPricem2 ~ s(Beds, k = 8) + 
+                         s(Baths, bs = "cr", k = 7) +
+                         s(Size, bs = "cr", k = opt_k_size) + 
+                         s(Month, bs="ps", m=c(1,1)) +
+                         PropertyType.f + Ber.f + 
+                         HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                         IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                         IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                         s(Longitude, Latitude, bs = 'gp', k = k_location[[j]], m = 2) + 
+                         s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                        data = train_data, method = "ML")
+    
+      print(paste('Model fitted for location k = ', k_location[j], sep = ''))
+      
+      # calculate rsq and rmse and add to the cv results 
+      results <- rbind(results, c(k_location = k_location[j], gam_model_metrics(gam.MRF, test_data)))
+  # }
+      
+      # after all iterations, store the mean values 
+      location_knot_cv_results <- rbind(location_knot_cv_results, results)
+}
+
+
+opt_k_location <- 100 ## INPUT BEST VALUE HERE 
+
+
+
+## Write all results to file 
+write.csv(size_knot_cv_results, './g1.size_knot_cv_results.csv', row.names = F) 
+write.csv(location_knot_cv_results, './g1.location_knot_cv_results.csv', row.names = F) 
+
+
+
+
+
+
+## -- Cross Validation --
+
+# create folds 
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+results <- c()
+area_results <- c()
+strata_results <- c()
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+  
+  # train the model 
+  gam.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                       LogPricem2 ~ s(Beds, k = 8) + 
+                       s(Baths, bs = "cr", k = 7) +
+                       s(Size, bs = "cr", k = opt_k_size) + 
+                       s(Month, bs="ps", m=c(1,1)) +
+                       PropertyType.f + Ber.f + 
+                       HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                       IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                       IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                       s(Longitude, Latitude, bs = 'gp', k = opt_k_location, m = 2) + 
+                       s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                      data = train_data, method = "ML")
+  
+    print(paste('modelling complete: ', i))
+    
+    # calculate rsq and rmse and add to the cv results 
+    results <- rbind(results, gam_model_metrics(gam.MRF, test_data))
+    print(paste('results compelte: ', i))
+    
+    # results in subareas 
+    for (area in unique_areas){
+      
+      area_data <- test_data[test_data$SubArea == area,]
+      area_results[[area]] <- rbind(area_results[[area]],
+                                    gam_model_metrics(gam.MRF, area_data))
+    }
+    
+    # results across price strata 
+    for (strata in unique_strata){
+      strata_data <- test_data[test_data$PriceStrata == strata,]
+      strata_results[[strata]] <- rbind(strata_results[[strata]],
+                                    gam_model_metrics(gam.MRF, strata_data))
+    }
+}
+
+#final cross validation results
+g1_cv_results <- round(colSums(results)/5, 2)
+results <- rbind(results, mean = g1_cv_results)
+write.csv(results, here('./Model Results/g1_cv_all_results_optks.csv'), row.names = F) 
+
+#final cross validation results in area 
+g1_area_cv <- round(sapply(area_results, colSums)/5, 2)
+write.csv(g1_area_cv, here('./Model Results/g1_cv_results_subareas.csv'), row.names = T) 
+
+#final cross validation results in strata 
+g1_strata_cv <- round(sapply(strata_results, colSums)/5, 2)
+write.csv(g1_strata_cv, here('./Model Results/g1_cv_results_strata.csv'), row.names = T) 
+
+
+
+
+
+
+
+### -- Cross Validation Full DF --
+
+n_folds <- 5
+folds <- createFolds(hd_all$Longitude, n_folds) 
+g1_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(g1_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+    print(Sys.time())
+  
+  # train the model 
+  gam.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                       LogPricem2 ~ s(Beds, k = 8) + 
+                       s(Baths, bs = "cr", k = 7) +
+                       s(Size, bs = "cr", k = opt_k_size) + 
+                       s(Month, bs="ps", m=c(1,1)) +
+                       PropertyType.f + Ber.f + 
+                       HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                       IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                       IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                       s(Longitude, Latitude, bs = 'gp', k = opt_k_location, m = 2) + 
+                       s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                      data = train_data, method = "ML")
+  
+    print(paste('modelling complete: ', i))
+      print(Sys.time())
+    
+    # overall results df 
+    resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                             Actual = test_data$Price, 
+                             PriceStrata = test_data$PriceStrata, 
+                             SubArea = test_data$SubArea) %>%
+                  mutate(gam_model_metrics_df(gam.MRF, test_data))
+    
+      # overall results 
+    g1_cv_df <- rbind(g1_cv_df, resutls_df)
+    print(paste('results compelte: ', i))
+      print(Sys.time())
+  
+}
+g1_cv_df
+write.csv(g1_cv_df, here('./Model Results/g1_cv_df.csv'), row.names = T) 
+
+
+# Analyse CV results 
+g1_cv_df <- readr::read_csv(here('./Model Results/g1_cv_df.csv'))
+g1_cv_metrics <- analyse_cv_results(g1_cv_df)
+
+# Anlyse in Subareas 
+g1_cv_metrics_area <- analyse_cv_results_areas(g1_cv_df)
+
+# Anlyse in Strata 
+g1_cv_metrics_strata <- analyse_cv_results_strata(g1_cv_df)
+
+
+
+
+
+
+```
+
+
+# GAM2: MRF SubAreas Eircode Model
+
+``` {r MRF SubAreas Eircode Model, warning = F}
+
+##-----------------------------------------------------------------------------
+# gam.sub.MRF
+
+# MRF Spatial GAM
+# All data with subareas 
+##-----------------------------------------------------------------------------
+
+
+## Train the model 
+tictoc::tic()
+gam.sub.MRF <- mgcv::gam(LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                        s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                        s(Size, bs = "cr", k = g2.opt_k_size, by = SubArea.f) + 
+                        s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                        SubArea.f + # for identifiability
+                        PropertyType.f*SubArea.f + 
+                        Ber.f +
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = g2.opt_k_location, m = 2) + 
+                        s(Eircode.f, bs = 'mrf', k = 139, xt = list(polys = eircodes_poly)),
+                    data = hd_all, method = "ML")
+tictoc::toc()
+saveRDS(gam.sub.MRF, file = here('./Models RData/g2.rds'))
+gam.sub.MRF <- readRDS('./Models RData/g2.rds')
+
+g2_morans <- Moran.I(gam.sub.MRF$residuals, inv_dist_matrix)
+write.csv(g2_morans, './Model Results/g2_morans.csv', row.names = F) 
+
+
+summary(gam.sub.MRF)
+
+#### Plot the splines in sub-markets 
+  ## Ordering of splines: 
+  # cork, dub, gal, limerick, rural, towns
+  # bed, bath, size, month
+
+  plot(gam.sub.MRF, select = 2, shade = TRUE, )
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF)
+  gam.sub.MRF_plots <- getViz(gam.sub.MRF)
+  
+  # plots for the bedroom splines 
+  png(file="./Figures/beds_splines.png", res = 200, width = 1300, height = 900)
+  par(mfrow=c(2, 3), mgp=c(2.5,1,0),   mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 1, shade= T, main = 'Submarket: Cork', ylim = c(-0.2, 0.2), xlab = 'Number of Bedrooms', ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 2, shade= T, main = 'Submarket: Dublin', xlab = 'Number of Bedrooms', ylim = c(-0.5, 0.25), ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 3, shade= T, main = 'Submarket: Galway', ylim = c(-0.3, 0.3), xlab = 'Number of Bedrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 4, shade= T, main = 'Submarket: Limerick', xlab = 'Number of Bedrooms', ylim = c(-0.5, 0.25), ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 5, shade= T, main = 'Submarket: Rural', ylim = c(-0.7, 0.5),  xlab = 'Number of Bedrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 6, shade= T, main = 'Submarket: Towns', ylim = c(-0.3, 0.4),  xlab = 'Number of Bedrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  dev.off()
+  
+  # plots for the bedroom splines 
+  png(file="./Figures/baths_splines.png",res = 200, width = 1300, height = 900)
+  par(mfrow=c(2, 3), mgp=c(2.5,1,0), mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 7, shade= T, main = 'Submarket: Cork', ylim = c(-0.4, 0.2), xlab = 'Number of Bathrooms', ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 8, shade= T, main = 'Submarket: Dublin', xlab = 'Number of Bathrooms', ylim = c(-0.5, 0.25), ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 9, shade= T, main = 'Submarket: Galway', ylim = c(-0.3, 0.3), xlab = 'Number of Bathrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 10, shade= T, main = 'Submarket: Limerick', xlab = 'Number of Bathrooms', ylim = c(-0.5, 0.6), ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 11, shade= T, main = 'Submarket: Rural', ylim = c(-0.7, 0.5),  xlab = 'Number of Bathrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 12, shade= T, main = 'Submarket: Towns', ylim = c(-0.3, 0.4),  xlab = 'Number of Bathrooms', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  dev.off()
+  
+  #plots for size 
+  png(file="./Figures/size_splines.png", res = 200, width = 1300, height = 900)
+  par(mfrow=c(2, 3), mgp=c(2.5,1,0),  mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 13, shade= T, ylim = c(-1, 0.5), xlab = expression('Property Size'~m^2), main = 'Submarket: Cork', ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 14, shade= T, ylim = c(-0.7, 0.5), xlab = expression('Property Size'~m^2), main = 'Submarket: Dublin', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 15, shade= T, ylim = c(-1.5, 1.5), xlab = expression('Property Size'~m^2), main = 'Submarket: Galway', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 16, shade= T, ylim = c(-0.7, 0.5), xlab = expression('Property Size'~m^2), main = 'Submarket: Limerick', ylab = 'Effect')
+  abline(h = 0, lty = 'dashed')
+    par(mar = c(3.5, 3.5, 4, 2))
+  plot(gam.sub.MRF, select = 17, shade= T, ylim = c(-1.2, 0.5),  xlab = expression('Property Size'~m^2), main = 'Submarket: Rural', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  plot(gam.sub.MRF, select = 18, shade= T, ylim = c(-1.5, 0.5), xlab = expression('Property Size'~m^2), main = 'Submarket: Towns', ylab = NA)
+  abline(h = 0, lty = 'dashed')
+  dev.off()
+  
+  
+
+
+
+g2_plot.dat <- plot(gam.sub.MRF, select = 20)
+plot_inx <- c(19:24)
+plot_titles <- c('Submarket: Cork', 'Submarket: Dublin', 'Submarket: Galway', 'Submarket: Limerick', 'Submarket: Rural', 'Submarket: Towns')
+plot_axis <- c('Effect', NA, NA, 'Effect', NA, NA)
+
+  png(file="./Figures/month_splines.png", res = 200, width = 1300, height = 900)
+  par(mfrow=c(2, 3), mgp=c(2.5,1,0))
+  for(inx in plot_inx){
+    i <- inx - 18
+    print(plot_titles[i])
+    print(plot_axis[i])
+    
+    # extract submarket data, fit and confidence interval bounds 
+    g2_plot.dat_sub <- g2_plot.dat[[inx]]
+    fit <- g2_plot.dat_sub$fit
+    upper = fit + (1 * g2_plot.dat_sub$se)
+    lower = fit - (1* g2_plot.dat_sub$se)
+    
+    # adjustment value for the y axis 
+    adjustment <- fit[1,]
+    
+    if(is.na(plot_axis[i])){
+      par(mar = c(3.5, 3.5, 4, 2))
+    }else{
+      par(mar = c(3.5, 3.5, 4, 2))
+    }
+    # create plot 
+    plot(1, type="n", main=plot_titles[i], xlab = 'Month of Sale', ylab=plot_axis[i], xlim=c(1,12), ylim=c(-0.05,0.05))
+    polygon(c(g2_plot.dat_sub$x, rev(g2_plot.dat_sub$x)), c(lower-adjustment, rev(upper-adjustment)),
+            col = "lightgrey", border = 0, lwd = 1, lty = 1)
+    lines(g2_plot.dat_sub$x, fit-adjustment,type = "l")
+    abline(h = 0, lty = 'dashed')
+  }
+  dev.off()
+
+
+
+
+  # Extract type coefficients of type 
+  grid_type <- emmeans(gam.sub.MRF, 'PropertyType.f', 
+                     nuisance = c('Ber.f', 'Eircode.f', 'IsNew',
+                                  'HasAttic', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 'HasCulDeSac'))
+  
+  coeff_type <- summary(contrast(grid_type, method= 'eff')) # sum to zero effects 
+  
+  # create a df with area, type, value, confidence intervals 
+  coeff_type <- data.frame(contrast = coeff_type$contrast, 
+                          coeff = exp(coeff_type$estimate), 
+                          lower = exp(coeff_type$estimate - 1.96*coeff_type$SE), 
+                          upper = exp(coeff_type$estimate + 1.96*coeff_type$SE))
+  coeff_type$contrast <- gsub(" effect", "", coeff_type$contrast)
+
+
+  #### Plot the relative scalings of Type across subareas 
+  # extract the means for each area by types 
+  grid_TypeArea <- emmeans(gam.sub.MRF, c('PropertyType.f', 'SubArea.f'), by = 'SubArea.f', 
+                  nuisance = c('IsNew', 'IsGarage', 'IsGroundFlrApt' ,'IsPenthouseApt', 
+                               'HasAttic', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 'HasCulDeSac', 
+                               'Eircode.f', 'Ber.f'))
+  coeff_TypeArea <- summary(contrast(grid_TypeArea, method= 'eff')) # sum to zero effects 
+  
+  # create a df with area, type, value, confidence intervals 
+  coeff_df_TypeArea <- data.frame(area = coeff_TypeArea$SubArea, 
+                                   contrast = coeff_TypeArea$contrast, 
+                                   coeff = exp(coeff_TypeArea$estimate), 
+                                   lower = exp(coeff_TypeArea$estimate - 1.96*coeff_TypeArea$SE), 
+                                   upper = exp(coeff_TypeArea$estimate + 1.96*coeff_TypeArea$SE)) %>% 
+                        arrange(coeff_TypeArea)
+  
+  coeff_df_TypeArea$contrast <- gsub(" effect|\\(|\\)", "", coeff_df_TypeArea$contrast)
+  coeff_df_TypeArea$contrast <- gsub("End of Terrace", "End-of-Terrace", coeff_df_TypeArea$contrast)
+  
+  # Create plots for each SubArea 
+  gam_sub1_TypeArea_plots <- list()
+  
+  # Loop through each area to create and store the plots
+  for (area in unique_areas) {
+    condition_coeff_mini <- coeff_df_TypeArea[coeff_df_TypeArea$area == area, ]
+    
+    if(area == as.character('Rural')| area ==  as.character('Cork')){
+      ylabel = 'Multiplicative Scaing'
+    } else{
+      ylabel = NULL
+    }
+    plot <- ggplot(condition_coeff_mini, aes(reorder(contrast, coeff), coeff)) + 
+            geom_point() +
+            ylim(c(0.8, 1.45)) + 
+            geom_linerange(aes(ymin = lower, ymax = upper)) + 
+            geom_abline(intercept = 1, slope = 0, color = "grey", linetype = "dotted") + # Line representing the grand mean 
+            theme_cowplot(font_size = 14) +
+            theme(plot.title = element_text(hjust = 0.5),
+                  axis.text.x = element_text(angle = 45, hjust = 1)) + 
+            labs(title = paste("Submarket: ", area), x = NULL, y = ylabel)
+          
+    gam_sub1_TypeArea_plots[[area]] <- plot
+  }
+  
+  # Combine the plots into a grid
+  TypeArea_scalings <- plot_grid(plotlist = gam_sub1_TypeArea_plots)
+  TypeArea_scalings
+  ggsave(filename = 'property_type_rel_scalings.png', path = './Figures', width = 40, height = 25, units = 'cm')
+
+
+  
+#### Plot the relative scalings of Ber 
+  # extract the means for each area by types 
+  grid_Ber <- emmeans(gam.sub.MRF, 'Ber.f', 
+                     nuisance = c('PropertyType.f', 'SubArea.f', 'Eircode.f', 'SubArea.f', 'IsNew',
+                                  'HasAttic', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 'HasCulDeSac'))
+  
+  coeff_Ber <- summary(contrast(grid_Ber, method= 'eff')) # sum to zero effects 
+  
+  # create a df with area, type, value, confidence intervals 
+  coeff_Ber <- data.frame(contrast = coeff_Ber$contrast, 
+                          coeff = exp(coeff_Ber$estimate), 
+                          lower = exp(coeff_Ber$estimate - 1.96*coeff_Ber$SE), 
+                          upper = exp(coeff_Ber$estimate + 1.96*coeff_Ber$SE))
+  coeff_Ber$contrast <- gsub(" effect", "", coeff_Ber$contrast)
+  
+  # Create plot of Ber scalings 
+  gam_sub1_Ber_plot <- ggplot(coeff_Ber, aes(contrast, coeff)) + 
+                       geom_point() +
+                       geom_linerange(aes(ymin = lower, ymax = upper)) + 
+                       geom_abline(intercept = 1, slope = 0, color = "grey", linetype = "dotted") + # Line representing the grand mean 
+                       theme_cowplot() +
+                       theme(plot.title = element_text(hjust = 0.5)) +
+                       labs(x = "BER", y = "Multiplicative Scaling")
+  gam_sub1_Ber_plot
+  ggsave(filename = 'ber_rel_scalings.png', path = './Figures', width = 25, height = 12, units = 'cm')
+
+
+#### Model Coefficients 
+
+# Get full summary first 
+g2_coeff <- summary.gam(gam.sub.MRF)
+# extract parametric
+g2_coeff$p.coeff
+g2_coeff.param <- as.data.frame(g2_coeff$p.table)
+
+# Dummy Vaeiable Coefficients 
+g2_dummy_var <- g2_coeff.param[grepl( 'TRUE', row.names(g2_coeff.param)),]
+# create a table summary
+coeff_dummy_var <- data.frame(contrast = row.names(g2_dummy_var), 
+                        coeff = exp(g2_dummy_var$Estimate),
+                        lower = exp(g2_dummy_var$Estimate - 1.96*g2_dummy_var$`Std. Error`), 
+                        upper = exp(g2_dummy_var$Estimate + 1.96*g2_dummy_var$`Std. Error`))
+# round numeri values
+coeff_dummy_var_rounded <- coeff_dummy_var
+coeff_dummy_var_rounded[,2:4] <- format(round(coeff_dummy_var[,2:4],2), nsmall = 2)
+dummy_var_label <- c('\\hspace{1em}\\textit{Dummy Variables}', '', '', '')
+coeff_dummy_var_rounded_w_label <- rbind(type_label, coeff_dummy_var_rounded)
+
+# Ber coefficients from coeff_Ber
+# round numeric values 
+coeff_Ber_rounded <- coeff_Ber
+coeff_Ber_rounded[,2:4] <- format(round(coeff_Ber[,2:4],2), nsmall = 2)
+ber_label <- c('\\hspace{1em}\\textit{BER Values}', '', '', '')
+coeff_ber_rounded_w_label <- rbind(ber_label, coeff_Ber_rounded)
+
+# Type coefficinets from coeff_type
+coeff_type_rounded <- coeff_type
+coeff_type_rounded[,2:4] <- format(round(coeff_type[,2:4],2), nsmall = 2)
+type_label <- c('\\hspace{1em}\\textit{Property Type}', '', '', '')
+coeff_type_rounded_w_label <- rbind(type_label, coeff_type_rounded)
+
+# Overall Coefficient Table 
+g2_coeff_df <- rbind(coeff_dummy_var_rounded_w_label, coeff_type_rounded_w_label, coeff_ber_rounded_w_label)
+write.csv(g2_coeff_df, './Model Results/temp_g2_coeff_df.csv', row.names = F) 
+
+## Reformatting 
+# First change Dummy Variables to true names 
+value_map <- c("HasAtticTRUE" = "Attic Conversion",
+               "HasGardenTRUE" = "Garden",
+               "HasCulDeSacTRUE" = "Cul-de-sac",
+               "HasGarageTRUE" = "Garage",
+               "IsRenovatedTRUE" = "Renovated Property",
+               "IsPeriodTRUE" = "Period Property",
+               "IsSouthFacingTRUE" = "South Facing Property",
+               "IsGroundFlrAptTRUE" = "Ground Floor Apartmemt",
+               "IsSecondFlrAptTRUE" = "Second Floor Apartment", 
+               "IsPenthouseAptTRUE" = "Penthouse Apartment",
+               "IsNewTRUE" = "New Property",
+               "End of Terrace" = "End-of-terrace",
+               "(Semi-Detached)" = "Semi-detached")
+# Replace only those values present in the mapping, leave others unchanged
+g2_coeff_df$contrast <- ifelse(g2_coeff_df$contrast %in% names(value_map), value_map[g2_coeff_df$contrast], g2_coeff_df$contrast)
+
+# create a conf int from lower and upper 
+g2_coeff_df$confint <- paste("[", g2_coeff_df$lower, ", ", g2_coeff_df$upper, "]", sep = "")
+# clear the confidence interval for the titles 
+g2_coeff_df$confint[g2_coeff_df$contrast %in% c('\\hspace{1em}\\textit{Dummy Variables}',
+                                                '\\hspace{1em}\\textit{Property Type}', 
+                                                '\\hspace{1em}\\textit{BER Values}')] <- ''
+
+# Create a LateX format of this table 
+g2_coeff_df %>% dplyr::select(c('contrast', 'coeff', 'confint')) %>% # select relevant columns       
+    kbl(, booktabs = T, format = 'latex',
+          col.names = c('Variable', "Estimate", "95\\% Confidence Interval"), 
+      row.names = F, 
+      caption = 'Coefficient estimates and 95\\% confidence intervals for the linear terms of the Submarket GAM',
+      linesep = "\\addlinespace", escape = F, label = 'tab:g2_coefficients') %>% 
+      kable_styling(latex_options = c('scale_down', font_size = 12))  %>%
+    column_spec(1, width = "8cm") %>% 
+    column_spec(2, width = "6cm") %>% 
+    column_spec(3, width = "4cm") 
+
+
+
+  
+  
+  
+  
+  
+## Plot the MRF surface  
+  # extract the data 
+  gam.MRF_plot_dat <- plot(gam.sub.MRF)
+  str(gam.MRF_plot_dat)
+  # the values from the eircode, add to the shapefile 
+  ec_values <- gam.MRF_plot_dat[[26]]$fit
+  ec_values_map_data <- cbind(eircodes_sf, ec_values)
+  
+  # Make the map 
+  g2_MRF_map <- ggplot() + 
+  geom_sf(data = ec_values_map_data, aes(fill = ec_values), color = "lightgrey", size = 0.5) + 
+  theme_map() +
+  scale_fill_bin(palette = "RedsYwGr", discrete = F, reverse = T) + 
+    theme(legend.position = c(1.05, .8),
+          legend.text = element_text(size = 12),
+          legend.key.width = unit(0.6, 'cm'), 
+          legend.spacing.x = unit(0.1, 'cm'),
+          legend.key.height = unit(0.4, 'cm'),
+          legend.title = element_text(size = 14),
+          legend.justification = c("right", "top"),
+          legend.box.just = "right") + 
+    labs(fill = expression("Eircode Adjustment"), color = "black") 
+  g2_MRF_map_lbls <-  g2_MRF_map + city_labels + limerick_segment + galway_segment + dublin_segment + cork_segment
+  g2_MRF_map_lbls
+  ggsave(filename = 'g2_MRF_map_lbls.png', path = './Figures', width = 30, height = 30, units = 'cm')
+
+  
+
+
+#### Create a heatmap of spatial surface 
+    # Create predicition data - new coordinates, size, 0 bed and 0 bath
+  Pred.coord <- data.frame(Longitude= coords.new.km[,1] ,Latitude = coords.new.km[,2],
+                           Size= rep(mean(hd_all$Size),ngrid*ngrid),
+                           PropertyType.f = rep(hd_all$PropertyType[1],ngrid*ngrid),
+                           Beds=rep(0,ngrid*ngrid),
+                           Baths=rep(0,ngrid*ngrid), 
+                           SubArea.f = rep('Rural', ngrid*ngrid), 
+                           Ber.f = 'C1', 
+                           Month = 6, 
+                           HasAttic = F, 
+                           HasGarden = F, HasCulDeSac = F,HasGarage = F,
+                        IsRenovated= F, IsPeriod= F, IsSouthFacing= F, IsGroundFlrApt= F, 
+                        IsSecondFlrApt= F, IsPenthouseApt= F, IsNew= F, Eircode.f = 'V94') 
+  
+  
+gam.sub_maps <- create_heatmap(gam.sub.MRF, Pred.coord, newd = newd)
+gam.sub_map_obs <- gam.sub_maps[[1]]
+gam.sub_map_n.obs <- gam.sub_maps[[2]]
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+#### Create a heatmap of spatial surface  + MRF 
+    # Create predicition data - new coordinates, size, 0 bed and 0 bath, 
+    # Type, BER, SubArea are set to the value neaerest 0. 
+    # EC values are actual eircode values 
+  
+  ## Assign eircodes to new coordinates 
+  # Create a shapefile of the new coordinates 
+  coords.new_sf <- st_as_sf(coords.new, coords = c("Longitude", "Latitude"), crs = st_crs(eircodes_sf))
+  sf_use_s2(F)
+
+  # join shapefile and eircodes ROI
+  coords.new_sf_ec <- st_join(coords.new_sf, eircodes_sf)
+  coords.new$Eircode <- ifelse(is.na(coords.new_sf_ec$Eircode), 'D03', coords.new_sf_ec$Eircode)
+  
+  Pred.coord <- data.frame(Longitude= coords.new.km[,1] ,Latitude = coords.new.km[,2],
+                           Size= rep(mean(hd_all$Size),ngrid*ngrid),
+                           PropertyType.f = rep('End of Terrace',ngrid*ngrid),
+                           Beds=rep(0,ngrid*ngrid),
+                           Baths=rep(0,ngrid*ngrid), 
+                           SubArea.f = rep('Towns', ngrid*ngrid), 
+                           Ber.f = 'C1', 
+                           Month = 6, 
+                           HasAttic = F, 
+                           HasGarden = F, HasCulDeSac = F,HasGarage = F,
+                          IsRenovated= F, IsPeriod= F, IsSouthFacing= F, IsGroundFlrApt= F, 
+                          IsSecondFlrApt= F, IsPenthouseApt= F, IsNew= F, Eircode.f = coords.new$Eircode) 
+  
+  gam.sub_maps <- create_heatmap(model = gam.sub.MRF, pred_cord = Pred.coord, 
+                                 newd = newd, in_data = hd_all, in_ngrid = 500)
+  gam.sub_map_obs <- gam.sub_maps[[1]]
+  gam.sub_map_n.obs <- gam.sub_maps[[2]]
+
+
+
+
+
+
+
+
+```
+
+
+# GAM2: Cross Validation for k
+
+```{r Cross Validation for k sub.MRF Model, include=FALSE}
+
+# create 10 folds of data (indexes)
+set.seed(14141441)
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+
+
+
+## K for the Size Variable 
+# Looking to find a "good" k
+k_size <- c(10, 20, 60, 80, 100, 150)
+k_location <- c(50, 100, 150, 300, 500, 750, 1000)
+
+size_knot_results <- c()
+size_knot_cv_results <- c()
+
+
+for(j in seq_along(k_size)){
+  
+  print(paste('Knot value: ', k_size[j]))
+  print(Sys.time())
+  
+  results <- c()
+  cv_results <- c()
+   
+  # Run 5 fold CV 
+  #for (i in 1:n_folds){
+  i = 1
+  
+    # create training and test 
+    train_data <- hd_all[-folds[[i]], ]
+    test_data <- hd_all[folds[[i]], ] 
+    print(paste('Splitting complete: ', i))
+    # train the model 
+    gam.sub.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                          LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                          s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                          s(Size, bs = "cr", k = k_size[j], by = SubArea.f) + 
+                          s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                          SubArea.f + # for identifiability
+                          PropertyType.f*SubArea.f + 
+                          Ber.f +
+                          HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                          IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                          IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                          s(Longitude, Latitude, bs = 'gp', k = 60, m = 2) + 
+                          s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                      data = train_data, method = "ML")
+    
+      print(paste('Model fitted for size: ', j, sep = ''))
+  print(Sys.time())
+      
+      # calculate rsq and rmse and add to the cv results 
+      results <- rbind(results, c(k_size = k_size[j], gam_model_metrics(gam.sub.MRF, test_data)))
+  #}
+          
+      print(paste('Model results for knot: ', j, sep = ''))
+  print(Sys.time())
+      
+      
+      # after all iterations, store the mean values 
+      size_knot_cv_results <- rbind(size_knot_cv_results, results)
+}
+write.csv(size_knot_cv_results, './Model Results/g2.size_knot_cv_results.csv', row.names = F) 
+
+
+
+g2.opt_k_size <- 40 ## INPUT BEST VALUE HERE 
+
+
+tictoc::tic()
+## K for the Location Variable 
+location_knot_results <- c()
+location_knot_cv_results <- c()
+
+for(j in seq_along(k_location)){
+  print(paste('Knot value: ', k_location[j]))
+  print(Sys.time())
+    
+  results <- c()
+  cv_results <- c()
+   
+  # Run 5 fold CV 
+  # for (i in 1:n_folds){
+  i = 1 
+    # create training and test 
+    train_data <- hd_all[-folds[[i]], ]
+    test_data <- hd_all[folds[[i]], ] 
+    
+    # train the model 
+     gam.sub.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                          LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                          s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                          s(Size, bs = "cr", k = g2.opt_k_size, by = SubArea.f) + 
+                          s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                          SubArea.f + # for identifiability
+                          PropertyType.f*SubArea.f + 
+                          Ber.f +
+                          HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                          IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                          IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                          s(Longitude, Latitude, bs = 'gp', k = k_location[[j]], m = 2) + 
+                          s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                      data = train, method = "ML")
+     
+      print(paste('Model fitted for location k = ', k_location[j], sep = ''))
+        print(Sys.time())
+      
+      # calculate rsq and rmse and add to the cv results 
+      results <- rbind(results, c(k_location = k_location[j], gam_model_metrics(gam.sub.MRF, test_data)))
+        print(paste('Results for location k = ', k_location[j], sep = ''))
+        print(Sys.time())
+  # }
+      
+      # after all iterations, store the mean values 
+      location_knot_cv_results <- rbind(location_knot_cv_results, results)
+      write.csv(location_knot_cv_results, './Model Results/g2.location_knot_cv_results.csv', row.names = F) 
+
+}
+tictoc::toc()
+
+
+
+g2.opt_k_location <-400 ## INPUT BEST VALUE HERE 
+  
+  
+
+
+
+
+### Analyse Results Knot Selection 
+k_location <- read.csv(here('./Model Results/g2.location_knot_cv_results.csv'))
+k_size <- read.csv(here('./Model Results/g2.size_knot_cv_results.csv'))
+
+# Location Knot 
+loc.p1 <- ggplot(k_location, aes(x=k_location, y=rsq)) +   
+  scale_x_continuous(breaks = c(k_location$k_location, 400)) + 
+  geom_point(aes()) + theme_cowplot(font_size = 14) +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  geom_vline(xintercept = 400, linetype="dashed", color = 'blue') +
+  geom_vline(xintercept = c(k_location$k_location), color = 'lightgrey', size =0.2) +
+  geom_line() + xlab('Number of Knots') + ylab(expression(~R^2))
+loc.p2 <- ggplot(k_location, aes(x=k_location, y=mape)) +   
+  scale_x_continuous(breaks = c(k_location$k_location, 400)) + 
+  geom_point(aes()) + theme_cowplot(font_size = 14) +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  geom_vline(xintercept = 400, linetype="dashed", color = 'blue') +
+  geom_vline(xintercept = c(k_location$k_location), color = 'lightgrey', size =0.2) +
+  geom_line() + xlab('Number of Knots') + ylab('MAPE (%)')
+loc.p3 <- ggplot(k_location, aes(x=k_location, y= within5)) +   
+  scale_x_continuous(breaks = c(k_location$k_location, 400)) + 
+  geom_point(aes()) + theme_cowplot(font_size = 14) +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  geom_vline(xintercept = 400, linetype="dashed", color = 'blue') +
+  geom_vline(xintercept = c(k_location$k_location), color = 'lightgrey', size =0.2) +
+  geom_line() + xlab('Number of Knots') + ylab('Within 5% of Price (%)')
+location_knot_plots <- plot_grid(loc.p1, loc.p3, loc.p2, nrow = 1)
+ggsave(filename = 'location_knot_plots.png', path = './Figures', width = 40, height = 12, units = 'cm')
+
+
+
+ggplot(k_location, aes(x=k_location, y= pi95)) +   
+  scale_x_continuous(breaks = c(k_location$k_location, 400)) + 
+  geom_point(aes()) + theme_cowplot(font_size = 14) +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  geom_vline(xintercept = 400, linetype="dashed", color = 'blue') +
+  geom_vline(xintercept = c(k_location$k_location), color = 'lightgrey', size =0.2) +
+  geom_line() + xlab('Number of Knots') + ylab('Within 95% PI (%)')
+
+
+# Size Knots 
+siz.p1 <- ggplot(k_size, aes(x=k_size, y=rsq)) +   
+  scale_x_continuous(breaks = c(k_size$k_size, 40)) + 
+  geom_point(aes()) + theme_minimal() + geom_vline(xintercept = 40, linetype="dashed", color = 'blue') +
+  geom_line() + xlab('Number of Knots') + ylab(expression(~R^2))
+siz.p2 <- ggplot(k_size, aes(x=k_size, y=mape)) +   
+  scale_x_continuous(breaks = c(k_size$k_size, 40)) + 
+  geom_point(aes()) + theme_minimal() + geom_vline(xintercept = 40, linetype="dashed", color = 'blue') +
+  geom_line() + xlab('Number of Knots') + ylab('MAPE')
+siz.p3 <- ggplot(k_size, aes(x=k_size, y=within10)) +   
+  scale_x_continuous(breaks = c(k_size$k_size, 40)) + 
+  geom_point(aes()) + theme_minimal() + geom_vline(xintercept = 40, linetype="dashed", color = 'blue') +
+  geom_line() + xlab('Number of Knots') + ylab('Within 10% of Price')
+size_knot_plots <- plot_grid(siz.p1, siz.p3, siz.p2, nrow = 1)
+
+
+
+
+
+
+
+## -- Cross Validation --
+n_folds <- 5
+folds <- createFolds(hd_all$Id, n_folds) 
+results <- c()
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('Splitting complete: ', i))
+  print(Sys.time())
+    
+  # train the model 
+  gam.sub.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                        LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                        s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                        s(Size, bs = "cr", k = g2.opt_k_size, by = SubArea.f) + 
+                        s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                        SubArea.f + # for identifiability
+                        PropertyType.f*SubArea.f + 
+                        Ber.f +
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = g2.opt_k_location, m=2) + 
+                        s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                    data = train_data, method = "ML")
+    print(paste('modelled', i))
+  print(Sys.time())
+    
+    # calculate rsq and rmse and add to the cv results 
+    results <- rbind(results, gam_model_metrics(gam.sub.MRF, test_data))
+    
+    
+    
+    # results in subareas 
+    for (area in unique_areas){
+      
+      area_data <- test_data[test_data$SubArea == area,]
+      area_results[[area]] <- rbind(area_results[[area]],
+                                    gam_model_metrics(gam.sub.MRF, area_data))
+    }
+    
+    # results across price strata 
+    for (strata in unique_strata){
+      strata_data <- test_data[test_data$PriceStrata == strata,]
+      strata_results[[strata]] <- rbind(strata_results[[strata]],
+                                    gam_model_metrics(gam.sub.MRF, strata_data))
+    }
+    
+        print(paste('results', i))
+  print(Sys.time())
+}
+
+
+#final cross validation results
+g2_cv_results <- round(colSums(results)/5, 2)
+results <- rbind(results, mean = g2_cv_results)
+write.csv(results, './Model Results/g2_cv_all_results_optks.csv', row.names = F) 
+
+#final cross validation results in area 
+g2_area_cv <- sapply(area_results, colSums)/10
+write.csv(g2_area_cv, here('./Model Results/g2_cv_results_subareas.csv'), row.names = T) 
+
+#final cross validation results in strata 
+g2_strata_cv <- sapply(strata_results, colSums)/10
+write.csv(g2_strata_cv, here('./Model Results/g2_cv_results_strata.csv'), row.names = T) 
+
+
+
+
+
+
+### -- Cross Validation Full DF --
+
+n_folds <- 5
+folds <- createFolds(hd_all$Longitude, n_folds) 
+g2_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(g2_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+
+for (i in 1:n_folds){
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+    print(Sys.time())
+  
+  # train the model 
+  gam.sub.MRF <- mgcv::gam(drop.unused.levels=FALSE, 
+                        LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                        s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                        s(Size, bs = "cr", k = g2.opt_k_size, by = SubArea.f) + 
+                        s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                        SubArea.f + # for identifiability
+                        PropertyType.f*SubArea.f + 
+                        Ber.f +
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = g2.opt_k_location, m=2) + 
+                        s(Eircode.f, bs = 'mrf', xt = list(polys = eircodes_poly)),
+                    data = train_data, method = "ML")
+  
+    print(paste('modelling complete: ', i))
+      print(Sys.time())
+    
+  
+    # overall results df 
+    resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                             Actual = test_data$Price, 
+                             PriceStrata = test_data$PriceStrata, 
+                             SubArea = test_data$SubArea) %>%
+                  mutate(gam_model_metrics_df(gam.sub.MRF, test_data))
+    
+      # overall results 
+    g2_cv_df <- rbind(g2_cv_df, resutls_df)
+    print(paste('results compelte: ', i))
+      print(Sys.time())
+}
+
+write.csv(g2_cv_df, here('./Model Results/g2_cv_df.csv'), row.names = T) 
+
+
+# Analyse CV results 
+g2_cv_df <- readr::read_csv(here('./Model Results/g2_cv_df.csv'))
+g2_cv_metrics <- analyse_cv_results(g2_cv_df)
+
+# Anlyse in Subareas 
+g2_cv_metrics_area <- analyse_cv_results_areas(g2_cv_df)
+
+# Anlyse in Strata 
+g2_cv_metrics_strata <- analyse_cv_results_strata(g2_cv_df)
+
+
+
+#### Predicted vs. Actial plots G2 
+  
+  # Full plot 
+  plt.pred <- exp(gam.sub.MRF$fitted.values)*hd_all$Size
+  plt.act <- hd_all$Price
+  data_lim <- ifelse(max(plt.pred) > max(plt.act), max(plt.pred), max(plt.act))
+  
+  g2_pred_act_plot <- ggplot(data.frame(plt.pred, plt.act), aes(x = plt.act, y = plt.pred)) + 
+          geom_point() +
+          geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dotted") + # Line representing perfect prediction
+          theme_cowplot(font_size = 12) +
+          theme(plot.title = element_text(hjust = 0.5),
+                panel.grid.major = element_line(color = "gray", linetype = "dashed"),
+                panel.grid.minor = element_blank(), 
+                axis.text.x = element_text(angle = 45, hjust = 1)) + coord_fixed(xlim = c(0,data_lim), ylim = c(0, data_lim)) + 
+     scale_x_continuous(label = comma, breaks = scales::breaks_width(1000000)) + 
+     scale_y_continuous(label = comma, breaks = scales::breaks_width((1000000))) + 
+          labs(title = paste("Submarket GAM"), x = "Actual Price (€)", y = "Predicted Price (€)")
+     g2_pred_act_plot   
+
+  # predicted v Actual plots in subareas    
+  g2_predact_plots <- list()
+  for (area in unique_areas) {
+  sub.pred <- exp(gam.sub.MRF$fitted.values[hd_all$SubArea == area])*hd_all$Size[hd_all$SubArea==area]
+  sub.actual <- hd_all$Price[hd_all$SubArea == area]
+  
+  data_lim <- ifelse(max(sub.pred) > max(sub.actual), max(sub.pred), max(sub.actual))
+    print(summary(sub.actual))
+    
+  scale_breaks <- ifelse(area %in% c('Rural', 'Dublin'), 1000000, 500000)
+  plot <- ggplot(data.frame(sub.pred, sub.actual), aes(x = sub.actual, y = sub.pred)) + 
+          geom_point() +
+          geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dotted") + # Line representing perfect prediction
+          theme_cowplot(font_size = 12) +
+          theme(plot.title = element_text(hjust = 0.5),
+                panel.grid.major = element_line(color = "gray", linetype = "dashed"),
+                panel.grid.minor = element_blank(), 
+                axis.text.x = element_text(angle = 45, hjust = 1)) + coord_fixed(xlim = c(0,data_lim), ylim = c(0, data_lim)) + 
+     scale_x_continuous(label = comma, breaks = scales::breaks_width(scale_breaks)) + 
+     scale_y_continuous(label = comma, breaks = scales::breaks_width(scale_breaks)) + 
+          labs(title = paste("Submarket: ", area), x = "Actual Price (€)", y = "Predicted Price (€)")
+        
+  g2_predact_plots[[area]] <- plot
+  }
+
+
+
+# Combine the plots into a grid
+g2_predact_sub_plots <- plot_grid(plotlist = g2_predact_plots)
+g2_predact_sub_plots
+ggsave(filename = 'g2_subareas_pred_act.png', path = './Figures', width = 40, height = 25, units = 'cm')
+
+
+```
+
+
+
+```{r no eircode}
+
+
+### -- Cross Validation Full DF --
+
+n_folds <- 5
+folds <- createFolds(hd_all$Longitude, n_folds) 
+g3_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(g3_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+
+for (i in 1:n_folds){
+  # create training and test 
+  train_data <- hd_all[-folds[[i]], ]
+  test_data <- hd_all[folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+    print(Sys.time())
+  
+  # train the model 
+  gam.sub.llat <- mgcv::gam(drop.unused.levels=FALSE, 
+                        LogPricem2 ~ s(Beds, k = 8, by = SubArea.f) + 
+                        s(Baths, bs = "cr", k = 7, by = SubArea.f) +
+                        s(Size, bs = "cr", k = g2.opt_k_size, by = SubArea.f) + 
+                        s(Month, bs="ps", m=c(1,1), by = SubArea.f) + 
+                        SubArea.f + # for identifiability
+                        PropertyType.f*SubArea.f + 
+                        Ber.f +
+                        HasAttic + HasGarden + HasCulDeSac + HasGarage + 
+                        IsRenovated + IsPeriod + IsSouthFacing + IsGroundFlrApt + 
+                        IsSecondFlrApt + IsPenthouseApt + IsNew + 
+                        s(Longitude, Latitude, bs = 'gp', k = g2.opt_k_location, m=2)
+                        ,
+                    data = train_data, method = "ML")
+  
+    print(paste('modelling complete: ', i))
+      print(Sys.time())
+    
+  
+    # overall results df 
+    resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                             Actual = test_data$Price, 
+                             PriceStrata = test_data$PriceStrata, 
+                             SubArea = test_data$SubArea) %>%
+                  mutate(gam_model_metrics_df(gam.sub.llat, test_data))
+    
+      # overall results 
+    g3_cv_df <- rbind(g3_cv_df, resutls_df)
+    print(paste('results compelte: ', i))
+      print(Sys.time())
+}
+
+write.csv(g3_cv_df, here('./Model Results/g3_cv_df.csv'), row.names = T) 
+
+# Analyse CV results 
+g3_cv_df <- readr::read_csv(here('./Model Results/g3_cv_df.csv'))
+g3_cv_metrics <- analyse_cv_results(g3_cv_df)
+
+# Anlyse in Subareas 
+g3_cv_metrics_area <- analyse_cv_results_areas(g3_cv_df)
+
+# Anlyse in Strata 
+g3_cv_metrics_strata <- analyse_cv_results_strata(g3_cv_df)
+
+```
+
+
+# Random Forest 
+
+```{r Random Forest}
+
+# Select the data for the random forest 
+hd_rf <- dplyr::select(hd_all, c('Price', # dependent variable 
+                                 'County', 'Region', 'SubArea', 'Longitude', 'Latitude', 'Eircode', # spataial
+                                 'Baths', 'Beds', 'Size', 'PropertyType', 'Ber', 'HasAttic', 'HasGarden', 
+                                 'HasCulDeSac', 'HasGarage', 'IsRenovated', 'IsPeriod', 'IsSouthFacing', 
+                                 'IsGroundFlrApt', 'IsSecondFlrApt', 'IsPenthouseApt', 'IsNew', # property characterisitcs
+                                 'Month',  # temporal
+                                 'PriceStrata' )) # For CV results 
+
+### -- Cross Validation --
+set.seed(14141441)
+n_folds <- 5
+rf_folds <- createFolds(hd_rf$Longitude, n_folds) 
+
+results <- c()
+area_results <- c()
+strata_results <- c()
+rf_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(rf_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+for (i in 1:n_folds){
+  
+  # create training and test 
+  train_data <- hd_rf[-rf_folds[[i]], ]
+  xtrain <- dplyr::select(train_data, -c('Price', 'PriceStrata'))
+  ytrain <- train_data$Price
+  test_data <- hd_rf[rf_folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+  
+  # fit the model 
+  rf <- quantregForest(x = xtrain, y = ytrain)
+  print(paste('modelling complete: ', i))
+  
+    # overall results df 
+  resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                           Actual = test_data$Price, 
+                           PriceStrata = test_data$PriceStrata, 
+                           SubArea = test_data$SubArea) %>%
+                mutate(rf_model_metrics_df(rf, test_data))
+  
+    # overall results 
+  rf_cv_df <- rbind(rf_cv_df, resutls_df)
+  
+  # 
+  # # overall results 
+  # results <- rbind(results, rf_model_metrics(rf, test_data))
+  # 
+  # # results in subareas 
+  # for (area in unique_areas){
+  #   
+  #   area_data <- test_data[test_data$SubArea == area,]
+  #   area_results[[area]] <- rbind(area_results[[area]],
+  #                                 rf_model_metrics(rf, area_data))
+  # }
+  # 
+  # # results across price strata 
+  # for (strata in unique_strata){
+  #   strata_data <- test_data[test_data$PriceStrata == strata,]
+  #   strata_results[[strata]] <- rbind(strata_results[[strata]],
+  #                                 rf_model_metrics(rf, strata_data))
+  # }
+  # print(paste('results complete: ', i))
+}
+
+#final cross validation results
+rf_cv <- round(colSums(results)/5, 2)
+results <- rbind(results, mean = rf_cv)
+write.csv(results, here('./Model Results/rf_cv_all_results.csv'), row.names = T) 
+
+#final cross validation results in area 
+rf_area_cv <- sapply(area_results, colSums)/5
+write.csv(rf_area_cv, here('./Model Results/rf_cv_results_subareas.csv'), row.names = T) 
+
+#final cross validation results in strata 
+rf_strata_cv <- sapply(strata_results, colSums)/5
+write.csv(rf_strata_cv, here('./Model Results/rf_cv_results_strata.csv'), row.names = T) 
+
+
+
+
+
+# Fit rf to all data 
+  x_data <- dplyr::select(hd_rf, -c('Price', 'PriceStrata'))
+  y_data <- hd_rf$Price
+  
+  # fit the model 
+  rf <- quantregForest(x = x_data, y = y_data)
+  saveRDS(rf, file = here('./Models RData/rf.rds'))
+  
+  rf_resid <- rf$predicted - y_data
+
+# Morans I 
+rf_morans <- Moran.I(rf_resid, inv_dist_matrix)
+write.csv(rf_morans, './Model Results/rf_morans.csv', row.names = F) 
+
+
+# variable importance 
+varImpPlot(rf, main = "Variable Importance: Node Impurity")
+
+
+# Try VarIMP with log(Pricem2)
+  x_data <- dplyr::select(hd_rf, -c('Price', 'PriceStrata'))
+  x_data <- x_data %>%
+  rename('Sub Market' = 'SubArea', 
+         'Property Type' = 'PropertyType',
+         'Attic Conversion' = 'HasAttic', 
+         'Garden' = 'HasGarden', 
+         'Cul-de-sac'= 'HasCulDeSac', 
+         'Garage' = 'HasGarage', 
+         'Renovated Property' = 'IsRenovated', 
+         'Period Property' = 'IsPeriod', 
+         'Penthouse Apartment' = 'IsPenthouseApt', 
+         'Ground Floor Apartment' = 'IsGroundFlrApt', 
+         'Second Floor Apartment' = 'IsSecondFlrApt', 
+         'South Facing Property' = 'IsSouthFacing',
+         'New Property' = 'IsNew',
+         'BER' = 'Ber')
+  
+  y_data <- log(hd_rf$Price/hd_rf$Size)
+  tictoc::tic()
+  rf <- quantregForest(x = x_data, y = y_data)
+  tictoc::toc()
+  saveRDS(rf, file = here('./Models RData/rf_logpricem2.rds'))
+  varImpPlot(rf, main = "Random Forest Variable Importance")
+  ggplot2::ggsave(filename = 'rf_varimp.png', path = './Figures', width = 30, height = 40, units = 'cm')
+  # 800X600
+  
+  # RF Info 
+  rf$ntree
+  rf$mtry
+
+### -- Cross Validation Full DF --
+set.seed(2)
+n_folds <- 5
+rf_folds <- createFolds(hd_rf$Longitude, n_folds) 
+rf_cv_df <- data.frame(matrix(ncol = 15, nrow = 0))
+colnames(rf_cv_df) <- c('Actual', 
+                       'SubArea', 
+                       'PriceStrata', 
+                       'Fold', 
+                       'Predicted', 
+                       'pi.50.l',
+                       'pi.50.u',
+                       'pi.80.l',
+                       'pi.80.u',
+                       'pi.90.l',
+                       'pi.90.u',
+                       'pi.95.l',
+                       'pi.95.u',
+                       'pi.99.l',
+                       'pi.99.u')
+
+for (i in 1:n_folds){
+  
+   # create training and test 
+  train_data <- hd_rf[-rf_folds[[i]], ]
+  xtrain <- dplyr::select(train_data, -c('Price', 'PriceStrata'))
+  ytrain <- train_data$Price
+  test_data <- hd_rf[rf_folds[[i]], ] 
+  print(paste('splitting complete: ', i))
+
+    # fit the model 
+  rf <- quantregForest(x = xtrain, y = ytrain)
+  print(paste('modelling complete: ', i))
+  
+  # overall results df 
+  resutls_df <- data.frame(Fold = rep(i, dim(test_data)[1]), 
+                           Actual = test_data$Price, 
+                           PriceStrata = test_data$PriceStrata, 
+                           SubArea = test_data$SubArea) %>%
+                mutate(rf_model_metrics_df(rf, test_data))
+  
+    # overall results 
+  rf_cv_df <- rbind(rf_cv_df, resutls_df)
+}
+
+write.csv(rf_cv_df, here('./Model Results/rf_cv_df.csv'), row.names = T) 
+
+# Analyse CV results 
+rf_cv_df <- readr::read_csv(here('./Model Results/rf_cv_df.csv'))
+rf_cv_metrics <- analyse_cv_results(rf_cv_df)
+
+# Anlyse in Subareas 
+rf_cv_metrics_area <- analyse_cv_results_areas(rf_cv_df)
+
+# Anlyse in Strata 
+rf_cv_metrics_strata <- analyse_cv_results_strata(rf_cv_df)
+
+
+
+#### Predicted vs. Actial plots Random Forest 
+  
+  # Full plot 
+  plt.pred <- (rf_cv_df$Predicted)
+  plt.act <- rf_cv_df$Actual
+  data_lim <- ifelse(max(plt.pred) > max(plt.act), max(plt.pred), max(plt.act))
+  
+  rf_pred_act_plot <- ggplot(data.frame(plt.pred, plt.act), aes(x = plt.act, y = plt.pred)) + 
+          geom_point() +
+          geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dotted") + # Line representing perfect prediction
+          theme_cowplot(font_size = 12) +
+          theme(plot.title = element_text(hjust = 0.5),
+                panel.grid.major = element_line(color = "gray", linetype = "dashed"),
+                panel.grid.minor = element_blank(), 
+                axis.text.x = element_text(angle = 45, hjust = 1)) + coord_fixed(xlim = c(0,data_lim), ylim = c(0, data_lim)) + 
+     scale_x_continuous(label = comma, breaks = scales::breaks_width(1000000)) + 
+     scale_y_continuous(label = comma, breaks = scales::breaks_width((1000000))) + 
+          labs(title = paste("Random Forest"), x = "Actual Price (€)", y = "Predicted Price (€)")
+     rf_pred_act_plot   
+  
+  # Combine G2 and RF plots 
+  pred_act_plots <- plot_grid(g2_pred_act_plot, rf_pred_act_plot)
+  pred_act_plots
+  ggsave(filename = 'pred_act_plots.png', path = './Figures', width = 40, height = 15, units = 'cm')
+
+
+  
+  # Plots in subareas 
+  rf_predact_plots <- list()
+  for (area in unique_areas) {
+  sub.pred <- rf_cv_df$Predicted[rf_cv_df$SubArea == area]
+  sub.actual <- rf_cv_df$Actual[rf_cv_df$SubArea == area]
+  
+  data_lim <- ifelse(max(sub.pred) > max(sub.actual), max(sub.pred), max(sub.actual))
+    print(summary(sub.actual))
+    
+  scale_breaks <- ifelse(area %in% c('Rural', 'Dublin'), 1000000, 500000)
+  plot <- ggplot(data.frame(sub.pred, sub.actual), aes(x = sub.actual, y = sub.pred)) + 
+          geom_point() +
+          geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dotted") + # Line representing perfect prediction
+          theme_cowplot(font_size = 12) +
+          theme(plot.title = element_text(hjust = 0.5),
+                panel.grid.major = element_line(color = "gray", linetype = "dashed"),
+                panel.grid.minor = element_blank(), 
+                axis.text.x = element_text(angle = 45, hjust = 1)) + coord_fixed(xlim = c(0,data_lim), ylim = c(0, data_lim)) + 
+     scale_x_continuous(label = comma, breaks = scales::breaks_width(scale_breaks)) + 
+     scale_y_continuous(label = comma, breaks = scales::breaks_width(scale_breaks)) + 
+          labs(title = paste("Submarket: ", area), x = "Actual Price (€)", y = "Predicted Price (€)")
+        
+  rf_predact_plots[[area]] <- plot
+  }
+
+# Combine the plots into a grid
+rf_predact_sub_plots <- plot_grid(plotlist = rf_predact_plots)
+rf_predact_sub_plots
+ggsave(filename = 'rf_subareas_pred_act.png', path = './Figures', width = 40, height = 25, units = 'cm')
+
+
+
+
+```
+
+# Model Results Analysis 
+
+```{r Model Results} 
+
+
+
+#### Cross Validation Resutls 
+  lm_cv <- readr::read_csv(here('./Model Results/lm_cv_all_results.csv'))[6,2:12]
+  g1_cv <- readr::read_csv(here('./Model Results/g1_cv_all_results_optks.csv'))[6,]
+  g2_cv <- readr::read_csv(here('./Model Results/g2_cv_all_results_optks.csv'))[6,]
+  rf_cv <- readr::read_csv(here('./Model Results/rf_cv_all_results.csv'))[6,2:12]
+  #rf_cv <- rf_cv_df  
+  names(g1_cv) <- names(rf_cv); names(g2_cv) <- names(rf_cv); names(lm_cv) <- names(rf_cv)
+  all_cv_df <- rbind(lm_cv, g1_cv, g2_cv, rf_cv)
+  
+  sub_cv_df <- data.frame(all_cv_df[, c(1, 2, 3, 4, 5, 7, 10)], 
+                          row.names = c('Linear Model', 'National GAM', 'Submarket GAM', 'Random Forest'))
+  
+  # Morans I results 
+  lm_morans <- readr::read_csv(here('./Model Results/lm_morans.csv'))
+  g1_morans <- readr::read_csv(here('./Model Results/g1_morans.csv'))
+  g2_morans <- readr::read_csv(here('./Model Results/g2_morans.csv'))
+  rf_morans <- readr::read_csv(here('./Model Results/rf_morans.csv'))
+  all_morans_df <- rbind(lm_morans, g1_morans, g2_morans, rf_morans)
+  
+  sub_cv_df$RSq <- round(as.numeric(sub_cv_df$RSq), 2)
+  sub_cv_df$RMSE <- paste('\\euro', big_mark(round(as.numeric(sub_cv_df$RMSE), 0)), sep=' ')
+  sub_cv_df$MAPE <- round(as.numeric(sub_cv_df$MAPE), 2) #%>%paste('\\%', sep = '')
+  sub_cv_df$'Within.5' <- round(as.numeric(sub_cv_df$'Within.5'), 1) %>%paste('\\%', sep = '')
+  sub_cv_df$'Within.10' <- round(as.numeric(sub_cv_df$'Within.10'), 1) %>%paste('\\%', sep = '')
+  sub_cv_df$'PI.50' <- round(as.numeric(sub_cv_df$'PI.50'), 1) %>%paste('\\%', sep = '')
+  sub_cv_df$'PI.95' <- round(as.numeric(sub_cv_df$'PI.95'), 1) %>%paste('\\%', sep = '')
+  sub_cv_df$'Moran\'s I' <- round(all_morans_df$observed, 2)
+  
+  kbl(sub_cv_df, booktabs = T, format = 'latex',
+          col.names = c('$R^2$', "RMSE", "MAPE", 
+                            "Within 5\\% of Price", 
+                            "Within 10\\% of Price", 
+                            "Within 50\\% Prediction Interval",
+                            "Within 95\\% Prediction Interval", 
+                            "Moran's I"), 
+      row.names = T, 
+      caption = 'Results from 5-fold cross validation',
+      linesep = "\\addlinespace", escape = F, label = 'cv_all') %>% 
+    kable_styling(latex_options = c('scale_down', font_size = 12)) %>% 
+    footnote('RMSE is the root mean squared error,
+             MAPE is the median absolute percentage error.') %>%
+    column_spec(1, width = "2.7cm") %>% 
+    column_spec(2, width = "1.4cm") %>% 
+    column_spec(3, width = "1.4cm") %>% 
+    column_spec(4, width = "1.4cm") %>% 
+    column_spec(5, width = "2cm") %>% 
+    column_spec(6, width = "2cm") %>% 
+    column_spec(7, width = "3cm") %>% 
+    column_spec(8,  width = "3cm") 
+
+
+#### Cross Validation restuls in subareas 
+  lm_a_cv <- readr::read_csv(here('./Model Results/lm_cv_results_subareas.csv'))
+  g1_a_cv <- readr::read_csv(here('./Model Results/g1_cv_results_subareas.csv'))
+  g2_a_cv <- readr::read_csv(here('./Model Results/g2_cv_results_subareas.csv'))
+  rf_a_cv <- readr::read_csv(here('./Model Results/rf_cv_results_subareas.csv'))
+
+  lm_a_cv <- data.frame(t(lm_a_cv)) 
+  names(lm_a_cv)[]  <- lm_a_cv[1,1:11]
+  lm_a_cv <- lm_a_cv[2:7,] 
+  
+  g1_a_cv <- data.frame(t(g1_a_cv)) 
+  names(g1_a_cv)[]  <- names(lm_a_cv)[1:11]
+  g1_a_cv <- g1_a_cv[2:7,] 
+  
+  g2_a_cv <- data.frame(t(g2_a_cv)) 
+  names(g2_a_cv)[]  <- names(lm_a_cv)[1:11]
+  g2_a_cv <- g2_a_cv[2:7,] 
+  
+  rf_a_cv <- data.frame(t(rf_a_cv)) 
+  names(rf_a_cv)[]  <- names(lm_a_cv)[1:11]
+  rf_a_cv <- rf_a_cv[2:7,]
+  
+area_cv <- rbind(lm_a_cv, g1_a_cv, g2_a_cv, rf_a_cv)
+
+area_cv$RSq <- round(as.numeric(area_cv$RSq), 2)
+area_cv$RMSE <- paste('\\euro', big_mark(round(as.numeric(area_cv$RMSE), 0)), sep=' ')
+area_cv$MAPE <- round(as.numeric(area_cv$MAPE), 2) #%>%paste('\\%', sep = '')
+area_cv$'Within-5' <- round(as.numeric(area_cv$'Within-5'), 1) %>%paste('\\%', sep = '')
+area_cv$'Within-10' <- round(as.numeric(area_cv$'Within-10'), 1) %>%paste('\\%', sep = '')
+area_cv$'Within-20' <- round(as.numeric(area_cv$'Within-20'), 1) %>%paste('\\%', sep = '')
+area_cv$'PI-50' <- round(as.numeric(area_cv$'PI-50'), 1) %>%paste('\\%', sep = '')
+area_cv$'PI-80' <- round(as.numeric(area_cv$'PI-80'), 1) %>%paste('\\%', sep = '')
+area_cv$'PI-90' <- round(as.numeric(area_cv$'PI-90'), 1) %>%paste('\\%', sep = '')
+area_cv$'PI-95' <- round(as.numeric(area_cv$'PI-95'), 1) %>%paste('\\%', sep = '')
+area_cv$'PI-99' <- round(as.numeric(area_cv$'PI-99'), 1) %>%paste('\\%', sep = '')
+
+
+area_cv <- area_cv %>% mutate('Model' = rep(c('Linear Regression', 'National GAM', 'Submarket GAM', 'Random Forest'), each= 6), 
+                   'Submarket' = rep(c('Rural', 'Towns', 'Dublin', 'Cork', 'Limerick', 'Galway'), 4))
+row.names(area_cv) <- NULL
+area_cv <- area_cv[c(12, 13, 1:5, 7, 10)]
+
+# create a kable table for LateX 
+kbl(area_cv, booktabs = T, format = 'latex',
+          col.names = c('Model', 'Submarket', '$R^2$', "RMSE", 
+                        "MAPE", 
+                            "Within 5\\% of Price", 
+                            "Within 10\\% of Price", 
+                            "Within 50\\% Prediction Interval",
+                            "Within 95\\% Prediction Interval"), 
+      row.names = F, 
+      caption = 'Results from 5-fold cross validation within submarkets',
+      linesep = "\\addlinespace", escape = F, label = 'cv_submarkets') %>% 
+    kable_styling(latex_options = c('scale_down', font_size = 12)) %>% 
+    footnote('RMSE is the root mean squared error,
+             MAPE is the median absolute percentage error.') %>%
+    column_spec(4, width = "1.4cm") %>% 
+    column_spec(5, width = "1.4cm") %>% 
+    column_spec(6, width = "2cm") %>% 
+    column_spec(7, width = "2cm") %>% 
+    column_spec(8, width = "3cm") %>% 
+    column_spec(9, width = "3cm") %>% 
+    collapse_rows(columns = 1, valign = 'top', latex_hline = 'major')  %>% 
+    landscape()
+  
+
+
+
+
+
+
+
+
+
+```

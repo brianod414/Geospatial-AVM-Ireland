@@ -1,0 +1,469 @@
+---
+title: "sr_sub_regions "
+author: "Brian O'Donovan"
+date: "2024-06-26"
+output: pdf_document
+---
+
+
+# EDA on SubAreas 
+
+```{r EDA SubAreas, include=FALSE}
+
+
+# gather count of each location and plot in bar chart 
+locations_df <- data.frame( Location = c('limerick', 'cork', 'galway', 'dublin', 'Towns', 'Rural'), 
+                 Count = c(dim(hd_limerick)[1], dim(hd_cork)[1], dim(hd_galway)[1], 
+                 dim(hd_dublin)[1], dim(hd_towns)[1], dim(hd_rural)[1]))
+
+ggplot(locations_df, aes(x = Location, y = Count)) +
+geom_bar(stat = "identity", fill = 'midnightblue') +
+labs(title = "Number of Observations in Areas",
+   x = "Location",
+   y = "Number of Rows") +
+theme_cowplot() + 
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Create the map with the points in eaech city and town 
+map_roi_counties + 
+  geom_point(data = hd_rural, aes(x = Longitude, y = Latitude), color = 'lightgrey', size = 1) +
+  geom_point(data = hd_dublin, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) + 
+  geom_point(data = hd_galway, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) + 
+  geom_point(data = hd_cork, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) + 
+  geom_point(data = hd_limerick, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) + 
+  geom_text(data = city_centres, aes(x = Longitude, y = Latitude), label = paste(city_centres$City), 
+            vjust = -2, hjust = 1.5, size = 3, color = 'black')
+    
+
+# Create the map with the towns and corresponding points 
+map_roi_counties + 
+  geom_point(data = hd_rural, aes(x = Longitude, y = Latitude), color = 'lightgrey', size = 1) +
+  geom_point(data = hd_towns, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) +
+  geom_text(data = town_centres, aes(x = Longitude, y = Latitude), label = paste(town_centres$Town), size = 2.7, color = 'black', alpha = 0.9)
+
+
+# Create the map with the cities, towns, rural 
+map_roi_counties + 
+  geom_point(data = hd_rural, aes(x = Longitude, y = Latitude), color = 'lightgrey', size = 1) +
+  geom_point(data = hd_towns, aes(x = Longitude, y = Latitude), color = 'steelblue', size = 1) + 
+  geom_point(data = hd[!(hd$Id %in% c(hd_rural$Id, hd_towns$Id)), ], aes(x = Longitude, y = Latitude), color = 'lightblue', size = 1) 
+
+```
+
+
+
+# EDA: Dublin 
+
+```{r EDA dublin, include=FALSE}
+
+
+#### Summary Statistics 
+hd_dublin %>%
+dplyr::select(Price, Pricem2, Size) %>%
+summarise(across(where(is.numeric), .fns = 
+                 list(min = min,
+                      median = median,
+                      mean = mean,
+                      stdev = sd,
+                      q25 = ~quantile(., 0.25),
+                      q75 = ~quantile(., 0.75),
+                      max = max))) %>%
+pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+
+
+#### The dependent variable
+
+pre_log_hist <- ggplot(hd_dublin, aes(x = Price))  + geom_histogram(color = 'darkgrey', fill = '#1aa7ec', bins = 30) +
+ggtitle("Histogram of Price") +
+labs(x = "Price (thousands €)", y = "Count") +
+theme_cowplot(font_size = 12)+theme(plot.title = element_text(hjust = 0.5)) 
+
+after_log_size_hist <- ggplot(hd_dublin, aes(x = LogPricem2)) + geom_histogram(color = 'darkgrey', fill = '#1aa7ec', bins = 30)+ ggtitle("Histogram of log(Price/Size)") + 
+labs(x = "log(Price/Size)", y = "Count")  +  
+theme_cowplot(font_size = 12) + theme(plot.title = element_text(hjust = 0.5))
+
+log_transform_comparison <- plot_grid(pre_log_hist, after_log_size_hist, labels = c('A', 'B', 'C'), nrow = 1)
+log_transform_comparison
+
+
+
+#### Bedrooms and Bathrooms 
+
+hd_dublin %>% 
+group_by(Beds) %>% 
+ summarise (n = n()) %>%
+mutate(freq = n / sum(n))
+
+hd_dublin %>% 
+group_by(Baths) %>% 
+ summarise (n = n()) %>%
+mutate(freq = n / sum(n))
+
+# Scatter plots of beds and baths with price demonstrate the need for smooths 
+plt1_price <- ggplot(hd_dublin, aes(x = Beds, y = Pricem2)) + geom_point() + ggtitle('The number of Bathrooms and Price') 
+plt2_price <- ggplot(hd_dublin, aes(x = Baths, y = Pricem2)) + geom_point()+ ggtitle('The number of Bedrooms and Price')
+plot_grid(plt1_price, plt2_price)
+
+
+#### Size
+
+# Scatter plots of size and pricem2 demonstrate the need for smooths 
+plt_size_price <- ggplot(hd_dublin, aes(x = Size, y = Pricem2)) + geom_point()
+plt_size_price
+
+# Scatter plots of size and price 
+plt_size_price <- ggplot(hd_dublin, aes(x = Size, y = Price)) + geom_point()
+plt_size_price
+
+
+#### By Eircode
+
+# bar chart of eircodes count 
+plt_eircode_bar <- ggplot(hd_dublin, aes(x = Eircode)) +
+geom_bar() +
+labs(title = "Bar Chart of Eircode Column",
+   x = "County",
+   y = "Count") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plt_eircode_bar
+
+# price and county boxplot 
+plt_eircode_price <- ggplot(hd_dublin, aes(x = Eircode, y = Pricem2)) +
+geom_boxplot() + 
+ggtitle('Price across Eircodes') +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plt_eircode_price
+
+
+
+#### By Type 
+
+# Count in Type
+plt_type_bar <- ggplot(hd_dublin, aes(x = PropertyType)) +
+geom_bar() +
+labs(title = "Bar Chart of County Column",
+   x = "County",
+   y = "Count") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plt_type_bar
+
+# Property Type and Size 
+ggplot(hd_dublin, aes(y = PropertyType, x = Pricem2)) +
+geom_density_ridges(fill = 'darkgreen') + 
+labs(x = "Price", y = "PropertyType")
+
+
+## Median Price for each Eircode 
+
+# Median Price in counties  
+ec_median <- hd_dublin %>%
+group_by(Eircode) %>%
+summarize(median_price = round(median(Pricem2), 0))
+
+# create a dataset with medians and polygons for counties 
+ec.med_map_data <- merge(eircodes_sf, ec_median, by =  "Eircode")
+ec.centroids <- st_centroid(ec.med_map_data)
+
+# extract the centroids to assign the label to 
+ec.centroids$longitude <- st_coordinates(ec.centroids)[, "X"]
+ec.centroids$latitude <- st_coordinates(ec.centroids)[, "Y"]
+
+
+## Maps 
+map_dub <-  ggplot() + 
+geom_sf(data = ec.med_map_data, aes(fill = median_price), color = "white", size = 1) + 
+theme_map() +
+geom_sf(data = hd_dublin_sp, aes(color = price.m2), size = 1) +
+scale_color_gradient(name = "GAM1 Residuals \n log price sqm", low = "red", high = "green") + 
+theme_map()
+map_dub
+
+# Map of postcode median values 
+map_median_dub <- ggplot() + 
+geom_sf(data = ec.med_map_data, aes(fill = median_price), color = "white", size = 1) + 
+theme_map() +
+scale_fill_viridis(begin = 0.4, end = 1, option = "viridis", breaks = c(1500,3000), labels = c('Low', 'High')) +
+geom_text(data = ec.centroids, aes(x = longitude, y = latitude, label = paste(Eircode, '\n€', median_price)), 
+        size = 2.7, color = 'black', alpha = 0.9) +  
+theme(legend.position = "bottom", legend.key.width = unit(2, 'cm'), legend.spacing.x = unit(1, 'cm'),
+    legend.justification = 'center', legend.text = element_text(size = 14),
+    legend.title = element_text(size = 16)) + 
+ggtitle('Median Residential Property Prices\nof Eircodes in dublin') +   
+theme(plot.title = element_text(hjust = 0.1, vjust = -10, color = 'black', size = 14)) + 
+labs(fill = "Median Price (€)", color = "black")
+map_median_dub
+
+
+```
+
+
+
+# GAM: Dublin 
+
+```{r GAM dublin, include=FALSE}
+
+
+#### Set Up for Spatial Surface ####
+# use original long lat since Longitude and Latitude are centered at 0,0 for Ireland 
+coords <- hd_dublin[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_dublin$Latitude, hd_dublin$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_dub_all <- cbind.data.frame(dplyr::select(hd_dublin, -c('Longitude', 'Latitude')), coords.all)
+
+
+
+# dublin GAM model gam.d1
+gam.d1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 10) + s(Baths, bs = "cr", k = 10) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_dub_all, method = "ML")
+summary(gam.d1)
+
+plot_gam.d1_resid <- plot(gam.d1$fitted.values, gam.d1$residuals)
+hist(gam.d1$residuals)
+
+draw(gam.d1)
+
+gam.check(gam.d1)
+
+
+## Plot the surface 
+gam.d1_maps <- create_heatmap(gam.d1, hd_dub_all)
+gam.d1_map_obs <- gam.d1_maps[[1]]
+gam.d1_map_n.obs <- gam.d1_maps[[2]]
+
+
+# Plot the variance surface 
+gam.d1_vmap <- create_var_heatmap(gam.d1, hd_dub_all)
+
+
+```
+
+
+
+# GAM: Cork 
+
+```{r GAM cork, include=FALSE}
+
+
+#### Set Up for Spatial Surface ####
+coords <- hd_cork[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_cork$Latitude, hd_cork$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_cork_all <- cbind.data.frame(dplyr::select(hd_cork, -c('Longitude', 'Latitude')), coords.all)
+
+
+# cork GAM model gam.c1
+gam.c1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 7) + s(Baths, bs = "cr", k = 7) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_cork_all, method = "ML")
+summary(gam.c1)
+
+plot_gam.c1_resid <- plot(gam.c1$fitted.values, gam.c1$residuals)
+hist(gam.c1$residuals)
+
+draw(gam.c1)
+
+gam.check(gam.c1)
+
+
+## Plot the surface 
+gam.c1_maps <- create_heatmap(gam.c1, hd_cork_all)
+gam.c1_map_obs <- gam.c1_maps[[1]]
+gam.c1_map_n.obs <- gam.c1_maps[[2]]
+
+
+# Plot the variance surface 
+gam.c1_vmap <- create_var_heatmap(gam.c1, hd_cork_all)
+
+
+
+```
+
+
+
+# GAM: Limerick 
+
+```{r GAM limerick, include=FALSE}
+
+
+#### Set Up for Spatial Surface ####
+coords <- hd_limerick[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_limerick$Latitude, hd_limerick$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_limerick_all <- cbind.data.frame(dplyr::select(hd_limerick, -c('Longitude', 'Latitude')), coords.all)
+
+
+# limerick GAM model gam.l1
+gam.l1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 6) + s(Baths, bs = "cr", k = 7) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_limerick_all, method = "ML")
+summary(gam.l1)
+
+plot_gam.l1_resid <- plot(gam.l1$fitted.values, gam.l1$residuals)
+hist(gam.l1$residuals)
+
+
+draw(gam.l1)
+
+gam.check(gam.l1)
+
+
+## Plot the surface 
+gam.l1_maps <- create_heatmap(gam.l1, hd_limerick_all)
+gam.l1_map_obs <- gam.l1_maps[[1]]
+gam.l1_map_n.obs <- gam.l1_maps[[2]]
+
+# Plot the variance surface 
+gam.l1_vmap <- create_var_heatmap(gam.l1, hd_limerick_all)
+
+
+
+```
+
+
+# GAM: Galway 
+
+```{r GAM galway, include=FALSE}
+
+
+#### Set Up for Spatial Surface ####
+coords <- hd_galway[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_galway$Latitude, hd_galway$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_galway_all <- cbind.data.frame(dplyr::select(hd_galway, -c('Longitude', 'Latitude')), coords.all)
+
+
+# galway GAM model gam.g1
+gam.g1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 7) + s(Baths, bs = "cr", k = 7) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_galway_all, method = "ML")
+summary(gam.g1)
+
+plot_gam.g1_resid <- plot(gam.g1$fitted.values, gam.g1$residuals)
+hist(gam.g1$residuals)
+
+gam.check(gam.g1)
+
+
+## Plot the surface 
+gam.g1_maps <- create_heatmap(gam.g1, hd_galway_all)
+gam.g1_map_obs <- gam.g1_maps[[1]]
+gam.g1_map_n.obs <- gam.g1_maps[[2]]
+
+
+# Plot the surface variance 
+gam.g1_maps <- create_var_heatmap(gam.g1, hd_galway_all)
+
+
+```
+
+
+
+# GAM: Rural 
+
+```{r GAM Rural, include=FALSE}
+
+#### Set Up for Spatial Surface ####
+coords <- hd_rural[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_rural$Latitude, hd_rural$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_rural_all <- cbind.data.frame(dplyr::select(hd_rural, -c('Longitude', 'Latitude')), coords.all)
+
+
+# rural GAM model gam.g1
+gam.r1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 7) + s(Baths, bs = "cr", k = 7) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_rural_all, method = "ML")
+summary(gam.r1)
+
+plot_gam.r1_resid <- plot(gam.r1$fitted.values, gam.r1$residuals)
+hist(gam.r1$residuals)
+
+
+gam.check(gam.r1)
+
+
+## Plot the surface 
+gam.r1_maps <- create_heatmap(gam.r1, hd_rural_all)
+gam.r1_map_obs <- gam.r1_maps[[1]]
+gam.r1_map_n.obs <- gam.r1_maps[[2]]
+
+# Plot the surface variance 
+gam.r1_vmap <- create_var_heatmap(gam.r1, hd_rural_all)
+
+
+
+```
+
+
+
+# GAM: Towns  
+
+```{r GAM towns, include=FALSE}
+
+
+#### Set Up for Spatial Surface ####
+coords <- hd_towns[,c("Longitude", "Latitude")]
+sp::coordinates(coords) <- ~Longitude+Latitude
+sp::proj4string(coords) <- sp::CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+utm <- "+proj=utm +zone=29 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+coords.km <- as.matrix(as.data.frame(sp::spTransform(coords, sp::CRS(utm))))/1000 #convert to km and make 0,0 origin
+
+coords.all <- cbind.data.frame(hd_towns$Latitude, hd_towns$Longitude, coords.km)
+colnames(coords.all) <- c("Latitude_Original", "Longitude_Original", "Longitude", "Latitude")
+hd_towns_all <- cbind.data.frame(dplyr::select(hd_towns, -c('Longitude', 'Latitude')), coords.all)
+
+
+# towns GAM model gam.t1
+gam.t1 <- mgcv::gam(LogPricem2 ~ s(Beds, bs = "cr", k = 7) + s(Baths, bs = "cr", k = 7) + s(Size, bs = "cr", k = 20) + 
+                  s(Longitude, Latitude, bs = 'gp', k = 100) + PropertyType.c,  data = hd_towns_all, method = "ML")
+summary(gam.t1)
+
+plot_gam.t1_resid <- plot(gam.t1$fitted.values, gam.t1$residuals)
+hist(gam.t1$residuals)
+
+draw(gam.t1)
+
+gam.check(gam.t1)
+
+
+## Plot the surface 
+gam.t1_maps <- create_heatmap(gam.t1, hd_towns_all)
+gam.t1_map_obs <- gam.t1_maps[[1]]
+gam.t1_map_n.obs <- gam.t1_maps[[2]]
+
+
+# Plot the variance surface 
+gam.t1_vmap <- create_var_heatmap(gam.t1, hd_towns_all)
+
+
+
+```
+
