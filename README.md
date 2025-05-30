@@ -1,5 +1,5 @@
 # Geospatial-AVM-Ireland
-Code used to develop a geospatial automated valuation model for property price in Ireland. Full report [here](https://github.com/brianod414/Geospatial-AVM-Ireland/blob/317ce8ec5fcc4fc0b5fd240e64c18eaca2dedc83/Geospatial_AVM_Ireland.pdf). 
+Code used to develop a geospatial automated valuation model for property price in Ireland. 
 
 ## Code Contents 
 
